@@ -75,7 +75,8 @@ all_test_() ->
                     fun should_succeed_on_all_docs_with_multiple_queries/1,
                     fun should_succeed_on_design_docs_with_multiple_queries/1,
                     fun should_fail_on_multiple_queries_with_keys_and_queries/1,
-                    fun should_return_correct_id_on_doc_copy/1
+                    fun should_return_correct_id_on_doc_copy/1,
+                    fun should_return_400_for_bad_engine/1
                 ]
             }
         }
@@ -337,3 +338,15 @@ attachment_doc() ->
             ]}
         }]}}
     ]}.
+
+
+should_return_400_for_bad_engine(_) ->
+    ?_test(begin
+        TmpDb = ?tempdb(),
+        Addr = config:get("chttpd", "bind_address", "127.0.0.1"),
+        Port = mochiweb_socket_server:get(chttpd, port),
+        BaseUrl = lists:concat(["http://", Addr, ":", Port, "/", ?b2l(TmpDb)]),
+        Url = BaseUrl ++ "?engine=cowabunga",
+        {ok, Status, _, _} = test_request:put(Url, [?CONTENT_JSON, ?AUTH], "{}"),
+        ?assertEqual(400, Status)
+    end).
