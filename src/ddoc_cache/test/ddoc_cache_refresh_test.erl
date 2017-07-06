@@ -58,8 +58,11 @@ refresh_ddoc({DbName, _}) ->
     ddoc_cache_tutil:clear(),
     meck:reset(ddoc_cache_ev),
     {ok, _} = ddoc_cache:open_doc(DbName, ?FOOBAR),
-    ?assertEqual(1, ets:info(?CACHE, size)),
-    [#entry{key = Key, val = DDoc}] = ets:tab2list(?CACHE),
+    meck:wait(ddoc_cache_ev, event, [started, '_'], 1000),
+    meck:wait(ddoc_cache_ev, event, [default_started, '_'], 1000),
+
+    ?assertEqual(2, ets:info(?CACHE, size)),
+    [#entry{key = Key, val = DDoc}, _] = lists:sort(ets:tab2list(?CACHE)),
     NewDDoc = DDoc#doc{
         body = {[{<<"foo">>, <<"baz">>}]}
     },
@@ -69,7 +72,7 @@ refresh_ddoc({DbName, _}) ->
     },
     meck:wait(ddoc_cache_ev, event, [updated, {Key, Expect}], 1000),
     ?assertMatch({ok, Expect}, ddoc_cache:open_doc(DbName, ?FOOBAR)),
-    ?assertEqual(1, ets:info(?CACHE, size)).
+    ?assertEqual(2, ets:info(?CACHE, size)).
 
 
 refresh_ddoc_rev({DbName, _}) ->
@@ -77,7 +80,11 @@ refresh_ddoc_rev({DbName, _}) ->
     meck:reset(ddoc_cache_ev),
     Rev = ddoc_cache_tutil:get_rev(DbName, ?FOOBAR),
     {ok, RevDDoc} = ddoc_cache:open_doc(DbName, ?FOOBAR, Rev),
-    [#entry{key = Key, val = DDoc}] = ets:tab2list(?CACHE),
+
+    meck:wait(ddoc_cache_ev, event, [started, '_'], 1000),
+    meck:wait(ddoc_cache_ev, event, [default_started, '_'], 1000),
+
+    [_, #entry{key = Key, val = DDoc}] = lists:sort(ets:tab2list(?CACHE)),
     NewDDoc = DDoc#doc{
         body = {[{<<"foo">>, <<"kazam">>}]}
     },
@@ -86,7 +93,7 @@ refresh_ddoc_rev({DbName, _}) ->
     % getting the same original response from the cache
     meck:wait(ddoc_cache_ev, event, [update_noop, Key], 1000),
     ?assertMatch({ok, RevDDoc}, ddoc_cache:open_doc(DbName, ?FOOBAR, Rev)),
-    ?assertEqual(1, ets:info(?CACHE, size)).
+    ?assertEqual(2, ets:info(?CACHE, size)).
 
 
 refresh_vdu({DbName, _}) ->

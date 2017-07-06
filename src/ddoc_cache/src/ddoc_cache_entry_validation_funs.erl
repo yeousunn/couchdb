@@ -16,7 +16,8 @@
 -export([
     dbname/1,
     ddocid/1,
-    recover/1
+    recover/1,
+    insert/2
 ]).
 
 
@@ -37,3 +38,7 @@ recover(DbName) ->
         end
     end, DDocs),
     {ok, Funs}.
+
+
+insert(_, _) ->
+    ok.

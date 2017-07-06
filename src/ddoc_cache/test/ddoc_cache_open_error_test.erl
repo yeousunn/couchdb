@@ -31,7 +31,7 @@ stop_couch(Ctx) ->
     ddoc_cache_tutil:stop_couch(Ctx).
 
 
-check_basic_test_() ->
+check_open_error_test_() ->
     {
         setup,
         fun start_couch/0,

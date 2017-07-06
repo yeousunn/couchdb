@@ -18,8 +18,9 @@
     dbname/1,
     ddocid/1,
     recover/1,
+    insert/2,
 
-    start_link/1,
+    start_link/2,
     shutdown/1,
     open/2,
     accessed/1,
@@ -65,8 +66,12 @@ recover({Mod, Arg}) ->
     Mod:recover(Arg).
 
 
-start_link(Key) ->
-    Pid = proc_lib:spawn_link(?MODULE, init, [Key]),
+insert({Mod, Arg}, Value) ->
+    Mod:insert(Arg, Value).
+
+
+start_link(Key, Default) ->
+    Pid = proc_lib:spawn_link(?MODULE, init, [{Key, Default}]),
     {ok, Pid}.
 
 
@@ -99,7 +104,7 @@ refresh(Pid) ->
     gen_server:cast(Pid, force_refresh).
 
 
-init(Key) ->
+init({Key, undefined}) ->
     true = ets:update_element(?CACHE, Key, {#entry.pid, self()}),
     St = #st{
         key = Key,
@@ -108,6 +113,26 @@ init(Key) ->
         accessed = 1
     },
     ?EVENT(started, Key),
+    gen_server:enter_loop(?MODULE, [], St);
+
+init({Key, Default}) ->
+    Updates = [
+        {#entry.val, Default},
+        {#entry.pid, self()}
+    ],
+    NewTs = os:timestamp(),
+    true = ets:update_element(?CACHE, Key, Updates),
+    true = ets:insert(?LRU, {{NewTs, Key, self()}}),
+    Msg = {'$gen_cast', refresh},
+    St = #st{
+        key = Key,
+        val = {open_ok, {ok, Default}},
+        opener = erlang:send_after(?REFRESH_TIMEOUT, self(), Msg),
+        waiters = undefined,
+        ts = NewTs,
+        accessed = 1
+    },
+    ?EVENT(default_started, Key),
     gen_server:enter_loop(?MODULE, [], St).
 
 

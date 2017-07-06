@@ -27,11 +27,22 @@ recover(DbName) ->
     {ok, {DbName, totes_custom}}.
 
 
+start_couch() ->
+    Ctx = ddoc_cache_tutil:start_couch(),
+    meck:new(ddoc_cache_ev, [passthrough]),
+    Ctx.
+
+
+stop_couch(Ctx) ->
+    meck:unload(),
+    ddoc_cache_tutil:stop_couch(Ctx).
+
+
 check_basic_test_() ->
     {
         setup,
-        fun ddoc_cache_tutil:start_couch/0,
-        fun ddoc_cache_tutil:stop_couch/1,
+        fun start_couch/0,
+        fun stop_couch/1,
         {with, [
             fun cache_ddoc/1,
             fun cache_ddoc_rev/1,
@@ -58,25 +69,31 @@ check_no_vdu_test_() ->
 
 cache_ddoc({DbName, _}) ->
     ddoc_cache_tutil:clear(),
+    meck:reset(ddoc_cache_ev),
     ?assertEqual(0, ets:info(?CACHE, size)),
     Resp1 = ddoc_cache:open_doc(DbName, ?FOOBAR),
     ?assertMatch({ok, #doc{id = ?FOOBAR}}, Resp1),
-    ?assertEqual(1, ets:info(?CACHE, size)),
+    meck:wait(ddoc_cache_ev, event, [started, '_'], 1000),
+    meck:wait(ddoc_cache_ev, event, [default_started, '_'], 1000),
+    ?assertEqual(2, ets:info(?CACHE, size)),
     Resp2 = ddoc_cache:open_doc(DbName, ?FOOBAR),
     ?assertEqual(Resp1, Resp2),
-    ?assertEqual(1, ets:info(?CACHE, size)).
+    ?assertEqual(2, ets:info(?CACHE, size)).
 
 
 cache_ddoc_rev({DbName, _}) ->
     ddoc_cache_tutil:clear(),
+    meck:reset(ddoc_cache_ev),
     Rev = ddoc_cache_tutil:get_rev(DbName, ?FOOBAR),
     ?assertEqual(0, ets:info(?CACHE, size)),
     Resp1 = ddoc_cache:open_doc(DbName, ?FOOBAR, Rev),
     ?assertMatch({ok, #doc{id = ?FOOBAR}}, Resp1),
-    ?assertEqual(1, ets:info(?CACHE, size)),
+    meck:wait(ddoc_cache_ev, event, [started, '_'], 1000),
+    meck:wait(ddoc_cache_ev, event, [default_started, '_'], 1000),
+    ?assertEqual(2, ets:info(?CACHE, size)),
     Resp2 = ddoc_cache:open_doc(DbName, ?FOOBAR, Rev),
     ?assertEqual(Resp1, Resp2),
-    ?assertEqual(1, ets:info(?CACHE, size)),
+    ?assertEqual(2, ets:info(?CACHE, size)),
 
     % Assert that the non-rev cache entry is separate
     Resp3 = ddoc_cache:open_doc(DbName, ?FOOBAR),
@@ -108,12 +125,16 @@ cache_custom({DbName, _}) ->
 
 cache_ddoc_refresher_unchanged({DbName, _}) ->
     ddoc_cache_tutil:clear(),
+    meck:reset(ddoc_cache_ev),
     ?assertEqual(0, ets:info(?CACHE, size)),
     ddoc_cache:open_doc(DbName, ?FOOBAR),
-    [Entry1] = ets:lookup(?CACHE, ets:first(?CACHE)),
+    meck:wait(ddoc_cache_ev, event, [started, '_'], 1000),
+    meck:wait(ddoc_cache_ev, event, [default_started, '_'], 1000),
+    Tab1 = [_, _] = lists:sort(ets:tab2list(?CACHE)),
     ddoc_cache:open_doc(DbName, ?FOOBAR),
-    [Entry2] = ets:lookup(?CACHE, ets:first(?CACHE)),
-    ?assertEqual(Entry1, Entry2).
+    meck:wait(ddoc_cache_ev, event, [accessed, '_'], 1000),
+    Tab2 = lists:sort(ets:tab2list(?CACHE)),
+    ?assertEqual(Tab2, Tab1).
 
 
 dont_cache_not_found({DbName, _}) ->

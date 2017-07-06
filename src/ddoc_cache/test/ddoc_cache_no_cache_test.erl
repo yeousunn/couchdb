@@ -20,6 +20,7 @@
 ddoc(DDocId) ->
     {ok, #doc{
         id = DDocId,
+        revs = {1, [<<"deadbeefdeadbeef">>]},
         body = {[
             {<<"ohai">>, null}
         ]}

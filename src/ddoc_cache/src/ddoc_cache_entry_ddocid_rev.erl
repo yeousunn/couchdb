@@ -16,7 +16,8 @@
 -export([
     dbname/1,
     ddocid/1,
-    recover/1
+    recover/1,
+    insert/2
 ]).
 
 
@@ -35,3 +36,12 @@ recover({DbName, DDocId, Rev}) ->
     Opts = [ejson_body, ?ADMIN_CTX],
     {ok, [Resp]} = fabric:open_revs(DbName, DDocId, [Rev], Opts),
     Resp.
+
+
+insert({DbName, DDocId, _Rev}, {ok, #doc{} = DDoc}) ->
+    Key = {ddoc_cache_entry_ddocid, {DbName, DDocId}},
+    spawn(fun() -> ddoc_cache_lru:insert(Key, DDoc) end);
+
+insert(_, _) ->
+    ok.
+

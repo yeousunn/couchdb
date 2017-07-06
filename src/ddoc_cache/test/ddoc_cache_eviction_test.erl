@@ -86,8 +86,10 @@ check_upgrade_clause({DbName, _}) ->
     ddoc_cache_tutil:clear(),
     meck:reset(ddoc_cache_ev),
     {ok, _} = ddoc_cache:open_doc(DbName, ?FOOBAR),
-    ?assertEqual(1, ets:info(?CACHE, size)),
+    meck:wait(ddoc_cache_ev, event, [started, '_'], 1000),
+    meck:wait(ddoc_cache_ev, event, [default_started, '_'], 1000),
+    ?assertEqual(2, ets:info(?CACHE, size)),
     gen_server:cast(ddoc_cache_opener, {do_evict, DbName}),
     meck:wait(ddoc_cache_ev, event, [evicted, DbName], 1000),
-    meck:wait(ddoc_cache_ev, event, [removed, '_'], 1000),
+    meck:wait(2, ddoc_cache_ev, event, [removed, '_'], 1000),
     ?assertEqual(0, ets:info(?CACHE, size)).

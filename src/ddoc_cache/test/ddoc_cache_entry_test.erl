@@ -61,7 +61,7 @@ check_entry_test_() ->
 cancel_and_replace_opener(_) ->
     Key = {ddoc_cache_entry_custom, {<<"foo">>, ?MODULE}},
     true = ets:insert_new(?CACHE, #entry{key = Key}),
-    {ok, Entry} = ddoc_cache_entry:start_link(Key),
+    {ok, Entry} = ddoc_cache_entry:start_link(Key, undefined),
     Opener1 = element(4, sys:get_state(Entry)),
     Ref1 = erlang:monitor(process, Opener1),
     gen_server:cast(Entry, force_refresh),
@@ -78,7 +78,7 @@ condenses_access_messages({DbName, _}) ->
     meck:reset(ddoc_cache_ev),
     Key = {ddoc_cache_entry_custom, {DbName, ?MODULE}},
     true = ets:insert(?CACHE, #entry{key = Key}),
-    {ok, Entry} = ddoc_cache_entry:start_link(Key),
+    {ok, Entry} = ddoc_cache_entry:start_link(Key, undefined),
     erlang:suspend_process(Entry),
     lists:foreach(fun(_) ->
         gen_server:cast(Entry, accessed)
@@ -105,7 +105,7 @@ evict_when_not_accessed(_) ->
     meck:reset(ddoc_cache_ev),
     Key = {ddoc_cache_entry_custom, {<<"bar">>, ?MODULE}},
     true = ets:insert_new(?CACHE, #entry{key = Key}),
-    {ok, Entry} = ddoc_cache_entry:start_link(Key),
+    {ok, Entry} = ddoc_cache_entry:start_link(Key, undefined),
     Ref = erlang:monitor(process, Entry),
     ?assertEqual(1, element(7, sys:get_state(Entry))),
     ok = gen_server:cast(Entry, refresh),

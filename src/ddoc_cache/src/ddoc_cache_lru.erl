@@ -18,6 +18,7 @@
 -export([
     start_link/0,
     open/1,
+    insert/2,
     refresh/2
 ]).
 
@@ -53,9 +54,9 @@ start_link() ->
 open(Key) ->
     try ets:lookup(?CACHE, Key) of
         [] ->
-            lru_start(Key);
+            lru_start(Key, true);
         [#entry{pid = undefined}] ->
-            lru_start(Key);
+            lru_start(Key, false);
         [#entry{val = undefined, pid = Pid}] ->
             couch_stats:increment_counter([ddoc_cache, miss]),
             ddoc_cache_entry:open(Pid, Key);
@@ -66,6 +67,15 @@ open(Key) ->
     catch _:_ ->
         couch_stats:increment_counter([ddoc_cache, recovery]),
         ddoc_cache_entry:recover(Key)
+    end.
+
+
+insert(Key, Value) ->
+    case ets:lookup(?CACHE, Key) of
+        [] ->
+            gen_server:call(?MODULE, {start, Key, Value}, infinity);
+        [#entry{}] ->
+            ok
     end.
 
 
@@ -96,7 +106,7 @@ terminate(_Reason, St) ->
     ok.
 
 
-handle_call({start, Key}, _From, St) ->
+handle_call({start, Key, Default}, _From, St) ->
     #st{
         pids = Pids,
         dbs = Dbs,
@@ -108,7 +118,7 @@ handle_call({start, Key}, _From, St) ->
             case trim(St, CurSize, max(0, MaxSize)) of
                 {ok, N} ->
                     true = ets:insert_new(?CACHE, #entry{key = Key}),
-                    {ok, Pid} = ddoc_cache_entry:start_link(Key),
+                    {ok, Pid} = ddoc_cache_entry:start_link(Key, Default),
                     true = ets:update_element(?CACHE, Key, {#entry.pid, Pid}),
                     ok = khash:put(Pids, Pid, Key),
                     store_key(Dbs, Key, Pid),
@@ -167,7 +177,7 @@ handle_cast({do_refresh, DbName, DDocIdList}, St) ->
             lists:foreach(fun(DDocId) ->
                 case khash:lookup(DDocIds, DDocId) of
                     {value, Keys} ->
-                        khash:fold(Keys, fun(_, Pid, _) ->
+                        khash:fold(Keys, fun(Key, Pid, _) ->
                             ddoc_cache_entry:refresh(Pid)
                         end, nil);
                     not_found ->
@@ -222,11 +232,15 @@ handle_db_event(_DbName, _Event, St) ->
     {ok, St}.
 
 
-lru_start(Key) ->
-    case gen_server:call(?MODULE, {start, Key}, infinity) of
+lru_start(Key, DoInsert) ->
+    case gen_server:call(?MODULE, {start, Key, undefined}, infinity) of
         {ok, Pid} ->
             couch_stats:increment_counter([ddoc_cache, miss]),
-            ddoc_cache_entry:open(Pid, Key);
+            Resp = ddoc_cache_entry:open(Pid, Key),
+            if not DoInsert -> ok; true ->
+                ddoc_cache_entry:insert(Key, Resp)
+            end,
+            Resp;
         full ->
             couch_stats:increment_counter([ddoc_cache, recovery]),
             ddoc_cache_entry:recover(Key)

@@ -16,7 +16,8 @@
 -export([
     dbname/1,
     ddocid/1,
-    recover/1
+    recover/1,
+    insert/2
 ]).
 
 
@@ -30,3 +31,7 @@ ddocid(_) ->
 
 recover({DbName, Mod}) ->
     Mod:recover(DbName).
+
+
+insert(_, _) ->
+    ok.

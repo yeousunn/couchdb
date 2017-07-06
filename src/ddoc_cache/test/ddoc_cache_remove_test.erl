@@ -67,16 +67,26 @@ remove_ddoc({DbName, _}) ->
     meck:reset(ddoc_cache_ev),
     ?assertEqual(0, ets:info(?CACHE, size)),
     {ok, _} = ddoc_cache:open_doc(DbName, ?FOOBAR),
-    ?assertEqual(1, ets:info(?CACHE, size)),
-    [#entry{key = Key, val = DDoc}] = ets:tab2list(?CACHE),
+
+    meck:wait(ddoc_cache_ev, event, [started, '_'], 1000),
+    meck:wait(ddoc_cache_ev, event, [default_started, '_'], 1000),
+
+    [#entry{val = DDoc}, #entry{val = DDoc}] = ets:tab2list(?CACHE),
+    {Depth, [RevId | _]} = DDoc#doc.revs,
     NewDDoc = DDoc#doc{
         deleted = true,
         body = {[]}
     },
     {ok, _} = fabric:update_doc(DbName, NewDDoc, [?ADMIN_CTX]),
-    meck:wait(ddoc_cache_ev, event, [removed, Key], 1000),
+
+    DDocIdKey = {ddoc_cache_entry_ddocid, {DbName, ?FOOBAR}},
+    Rev = {Depth, RevId},
+    DDocIdRevKey = {ddoc_cache_entry_ddocid_rev, {DbName, ?FOOBAR, Rev}},
+    meck:wait(ddoc_cache_ev, event, [removed, DDocIdKey], 1000),
+    meck:wait(ddoc_cache_ev, event, [update_noop, DDocIdRevKey], 1000),
+
     ?assertMatch({not_found, deleted}, ddoc_cache:open_doc(DbName, ?FOOBAR)),
-    ?assertEqual(0, ets:info(?CACHE, size)).
+    ?assertEqual(1, ets:info(?CACHE, size)).
 
 
 remove_ddoc_rev({DbName, _}) ->
@@ -84,7 +94,15 @@ remove_ddoc_rev({DbName, _}) ->
     meck:reset(ddoc_cache_ev),
     Rev = ddoc_cache_tutil:get_rev(DbName, ?VDU),
     {ok, _} = ddoc_cache:open_doc(DbName, ?VDU, Rev),
-    [#entry{key = Key, val = DDoc, pid = Pid}] = ets:tab2list(?CACHE),
+
+    meck:wait(ddoc_cache_ev, event, [started, '_'], 1000),
+    meck:wait(ddoc_cache_ev, event, [default_started, '_'], 1000),
+
+    % Notice the sort so that we know we're getting the
+    % revid version second.
+    [_, #entry{key = Key, val = DDoc, pid = Pid}]
+            = lists:sort(ets:tab2list(?CACHE)),
+
     NewDDoc = DDoc#doc{
         body = {[{<<"an">>, <<"update">>}]}
     },
@@ -101,7 +119,7 @@ remove_ddoc_rev({DbName, _}) ->
             {{not_found, missing}, _},
             ddoc_cache:open_doc(DbName, ?VDU, Rev)
         ),
-    ?assertEqual(0, ets:info(?CACHE, size)).
+    ?assertEqual(1, ets:info(?CACHE, size)).
 
 
 remove_ddoc_rev_only({DbName, _}) ->
