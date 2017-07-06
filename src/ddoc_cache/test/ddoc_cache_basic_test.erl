@@ -44,6 +44,18 @@ check_basic_test_() ->
     }.
 
 
+check_no_vdu_test_() ->
+    {
+        setup,
+        fun() -> ddoc_cache_tutil:start_couch([{write_ddocs, false}]) end,
+        fun ddoc_cache_tutil:stop_couch/1,
+        {with, [
+            fun cache_no_vdu_no_ddoc/1,
+            fun cache_no_vdu_empty_ddoc/1
+        ]}
+    }.
+
+
 cache_ddoc({DbName, _}) ->
     ddoc_cache_tutil:clear(),
     ?assertEqual(0, ets:info(?CACHE, size)),
@@ -120,3 +132,23 @@ deprecated_api_works({DbName, _}) ->
     {ok, _} = ddoc_cache:open(DbName, ?MODULE),
     {ok, _} = ddoc_cache:open(DbName, validation_funs).
 
+
+cache_no_vdu_no_ddoc({DbName, _}) ->
+    ddoc_cache_tutil:clear(),
+    Resp = ddoc_cache:open_validation_funs(DbName),
+    ?assertEqual({ok, []}, Resp),
+    ?assertEqual(1, ets:info(?CACHE, size)),
+    ?assertEqual(1, ets:info(?LRU, size)).
+
+
+cache_no_vdu_empty_ddoc({DbName, _}) ->
+    ddoc_cache_tutil:clear(),
+    DDoc = #doc{
+        id = <<"_design/no_vdu">>,
+        body = {[]}
+    },
+    {ok, _} = fabric:update_docs(DbName, [DDoc], [?ADMIN_CTX]),
+    Resp = ddoc_cache:open_validation_funs(DbName),
+    ?assertEqual({ok, []}, Resp),
+    ?assertEqual(1, ets:info(?CACHE, size)),
+    ?assertEqual(1, ets:info(?LRU, size)).

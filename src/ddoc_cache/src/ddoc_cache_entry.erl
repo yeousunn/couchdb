@@ -182,17 +182,18 @@ handle_cast(Msg, St) ->
 handle_info({'DOWN', _, _, Pid, Resp}, #st{key = Key, opener = Pid} = St) ->
     case Resp of
         {open_ok, Key, {ok, Val}} ->
-            if not is_list(St#st.waiters) -> ok; true ->
-                respond(St#st.waiters, {open_ok, {ok, Val}})
-            end,
             update_cache(St, Val),
             Msg = {'$gen_cast', refresh},
             Timer = erlang:send_after(?REFRESH_TIMEOUT, self(), Msg),
-            NewSt = St#st{
+            NewSt1 = St#st{
                 val = {open_ok, {ok, Val}},
                 opener = Timer
             },
-            {noreply, update_lru(NewSt)};
+            NewSt2 = update_lru(NewSt1),
+            if not is_list(St#st.waiters) -> ok; true ->
+                respond(St#st.waiters, {open_ok, {ok, Val}})
+            end,
+            {noreply, NewSt2};
         {Status, Key, Other} ->
             NewSt = St#st{
                 val = {Status, Other},
