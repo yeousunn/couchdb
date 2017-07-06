@@ -231,7 +231,8 @@ handle_info({'DOWN', _, _, Pid, Resp}, #st{key = Key, opener = Pid} = St) ->
             update_cache(St, Val),
             NewSt1 = St#st{
                 val = {open_ok, {ok, Val}},
-                opener = start_timer()
+                opener = start_timer(),
+                waiters = undefined
             },
             NewSt2 = update_lru(NewSt1),
             if not is_list(St#st.waiters) -> ok; true ->
