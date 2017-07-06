@@ -63,7 +63,8 @@ check_lru_test_() ->
             fun check_multi_start/1,
             fun check_multi_open/1,
             fun check_capped_size/1,
-            fun check_full_cache/1
+            fun check_full_cache/1,
+            fun check_cache_refill/1
         ]}
     }.
 
@@ -88,7 +89,7 @@ check_multi_start(_) ->
     ?assert(is_process_alive(Opener)),
     Opener ! go,
     receive {'DOWN', OpenerRef, _, _, _} -> ok end,
-    lists:foreach(fun({CPid, Ref}) ->
+    lists:foreach(fun({_, Ref}) ->
         receive
             {'DOWN', Ref, _, _, normal} -> ok
         end
@@ -159,3 +160,36 @@ check_full_cache(_) ->
         meck:wait(I - 5, ddoc_cache_ev, event, [full, '_'], 1000),
         ?assertEqual(5, ets:info(?CACHE, size))
     end, lists:seq(6, 20)).
+
+
+check_cache_refill({DbName, _}) ->
+    ddoc_cache_tutil:clear(),
+    meck:reset(ddoc_cache_ev),
+
+    InitDDoc = fun(I) ->
+        NumBin = list_to_binary(integer_to_list(I)),
+        DDocId = <<"_design/", NumBin/binary>>,
+        Doc = #doc{id = DDocId, body = {[]}},
+        {ok, _} = fabric:update_doc(DbName, Doc, [?ADMIN_CTX]),
+        {ok, _} = ddoc_cache:open_doc(DbName, DDocId),
+        {ddoc_cache_entry_ddocid, {DbName, DDocId}}
+    end,
+
+    lists:foreach(fun(I) ->
+        Key = InitDDoc(I),
+        couch_log:error("STARTED? ~p", [Key]),
+        meck:wait(ddoc_cache_ev, event, [started, Key], 1000),
+        ?assert(ets:info(?CACHE, size) > 0)
+    end, lists:seq(1, 5)),
+
+    ShardName = element(2, hd(mem3:shards(DbName))),
+    {ok, _} = ddoc_cache_lru:handle_db_event(ShardName, deleted, foo),
+    meck:wait(ddoc_cache_ev, event, [evicted, DbName], 1000),
+    meck:wait(10, ddoc_cache_ev, event, [removed, '_'], 1000),
+    ?assertEqual(0, ets:info(?CACHE, size)),
+
+    lists:foreach(fun(I) ->
+        Key = InitDDoc(I),
+        meck:wait(ddoc_cache_ev, event, [started, Key], 1000),
+        ?assert(ets:info(?CACHE, size) > 0)
+    end, lists:seq(6, 10)).

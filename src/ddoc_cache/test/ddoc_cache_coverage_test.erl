@@ -33,7 +33,7 @@ coverage_test_() ->
 
 restart_lru() ->
     send_bad_messages(ddoc_cache_lru),
-    ?assertEqual(ok, ddoc_cache_lru:terminate(bang, {st, a, b, c, d})),
+    ?assertEqual(ok, ddoc_cache_lru:terminate(bang, {st, a, b, c})),
     ?assertEqual({ok, foo}, ddoc_cache_lru:code_change(1, foo, [])).
 
 
@@ -47,7 +47,7 @@ restart_evictor() ->
     meck:new(ddoc_cache_ev, [passthrough]),
     try
         State = sys:get_state(ddoc_cache_lru),
-        Evictor = element(5, State),
+        Evictor = element(4, State),
         Ref = erlang:monitor(process, Evictor),
         exit(Evictor, shutdown),
         receive
@@ -57,7 +57,7 @@ restart_evictor() ->
         end,
         meck:wait(ddoc_cache_ev, event, [evictor_died, '_'], 1000),
         NewState = sys:get_state(ddoc_cache_lru),
-        NewEvictor = element(5, NewState),
+        NewEvictor = element(4, NewState),
         ?assertNotEqual(Evictor, NewEvictor)
     after
         meck:unload()

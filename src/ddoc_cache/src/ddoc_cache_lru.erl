@@ -42,7 +42,6 @@
 -record(st, {
     pids, % pid -> key
     dbs, % dbname -> docid -> key -> pid
-    size,
     evictor
 }).
 
@@ -93,7 +92,6 @@ init(_) ->
     {ok, #st{
         pids = Pids,
         dbs = Dbs,
-        size = 0,
         evictor = Evictor
     }}.
 
@@ -109,20 +107,20 @@ terminate(_Reason, St) ->
 handle_call({start, Key, Default}, _From, St) ->
     #st{
         pids = Pids,
-        dbs = Dbs,
-        size = CurSize
+        dbs = Dbs
     } = St,
     case ets:lookup(?CACHE, Key) of
         [] ->
             MaxSize = config:get_integer("ddoc_cache", "max_size", 1000),
+            CurSize = ets:info(?CACHE, size),
             case trim(St, CurSize, max(0, MaxSize)) of
-                {ok, N} ->
+                ok ->
                     true = ets:insert_new(?CACHE, #entry{key = Key}),
                     {ok, Pid} = ddoc_cache_entry:start_link(Key, Default),
                     true = ets:update_element(?CACHE, Key, {#entry.pid, Pid}),
                     ok = khash:put(Pids, Pid, Key),
                     store_key(Dbs, Key, Pid),
-                    {reply, {ok, Pid}, St#st{size = CurSize - N + 1}};
+                    {reply, {ok, Pid}, St};
                 full ->
                     ?EVENT(full, Key),
                     {reply, full, St}
@@ -251,7 +249,7 @@ trim(_, _, 0) ->
     full;
 
 trim(_St, CurSize, MaxSize) when CurSize < MaxSize ->
-    {ok, 0};
+    ok;
 
 trim(St, CurSize, MaxSize) when CurSize >= MaxSize ->
     case ets:first(?LRU) of
@@ -259,7 +257,7 @@ trim(St, CurSize, MaxSize) when CurSize >= MaxSize ->
             full;
         {_Ts, Key, Pid} ->
             remove_entry(St, Key, Pid),
-            {ok, 1}
+            trim(St, CurSize - 1, MaxSize)
     end.
 
 
