@@ -83,8 +83,13 @@ purge_modules() ->
     case application:get_key(ddoc_cache, modules) of
         {ok, Mods} ->
             lists:foreach(fun(Mod) ->
-                code:delete(Mod),
-                code:purge(Mod)
+                case code:which(Mod) of
+                    cover_compiled ->
+                        ok;
+                    _ ->
+                        code:delete(Mod),
+                        code:purge(Mod)
+                end
             end, Mods);
         undefined ->
             ok
