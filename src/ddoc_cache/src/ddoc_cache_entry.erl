@@ -48,7 +48,8 @@
     val,
     opener,
     waiters,
-    ts
+    ts,
+    accessed
 }).
 
 
@@ -95,7 +96,7 @@ accessed(Pid) ->
 
 
 refresh(Pid) ->
-    gen_server:cast(Pid, refresh).
+    gen_server:cast(Pid, force_refresh).
 
 
 init(Key) ->
@@ -103,7 +104,8 @@ init(Key) ->
     St = #st{
         key = Key,
         opener = spawn_opener(Key),
-        waiters = []
+        waiters = [],
+        accessed = 1
     },
     ?EVENT(started, Key),
     gen_server:enter_loop(?MODULE, [], St).
@@ -153,7 +155,25 @@ handle_call(Msg, _From, St) ->
 handle_cast(accessed, St) ->
     ?EVENT(accessed, St#st.key),
     drain_accessed(),
-    {noreply, update_lru(St)};
+    NewSt = St#st{
+        accessed = St#st.accessed + 1
+    },
+    {noreply, update_lru(NewSt)};
+
+handle_cast(force_refresh, St) ->
+    % If we had frequent design document updates
+    % they could end up racing accessed events and
+    % end up prematurely evicting this entry from
+    % cache. To prevent this we just make sure that
+    % accessed is set to at least 1 before we
+    % execute a refresh.
+    NewSt = if St#st.accessed > 0 -> St; true ->
+        St#st{accessed = 1}
+    end,
+    handle_cast(refresh, NewSt);
+
+handle_cast(refresh, #st{accessed = 0} = St) ->
+    {stop, normal, St};
 
 handle_cast(refresh, #st{opener = Ref} = St) when is_reference(Ref) ->
     #st{
@@ -161,7 +181,8 @@ handle_cast(refresh, #st{opener = Ref} = St) when is_reference(Ref) ->
     } = St,
     erlang:cancel_timer(Ref),
     NewSt = St#st{
-        opener = spawn_opener(Key)
+        opener = spawn_opener(Key),
+        accessed = 0
     },
     {noreply, NewSt};
 
@@ -171,7 +192,8 @@ handle_cast(refresh, #st{opener = Pid} = St) when is_pid(Pid) ->
         {'DOWN', _, _, Pid, _} -> ok
     end,
     NewSt = St#st{
-        opener = spawn_opener(St#st.key)
+        opener = spawn_opener(St#st.key),
+        accessed = 0
     },
     {noreply, NewSt};
 

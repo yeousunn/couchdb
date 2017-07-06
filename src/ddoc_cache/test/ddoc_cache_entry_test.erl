@@ -50,6 +50,7 @@ check_entry_test_() ->
             fun cancel_and_replace_opener/1,
             fun condenses_access_messages/1,
             fun kill_opener_on_terminate/1,
+            fun evict_when_not_accessed/1,
             fun open_dead_entry/1,
             fun handles_bad_messages/1,
             fun handles_code_change/1
@@ -63,7 +64,7 @@ cancel_and_replace_opener(_) ->
     {ok, Entry} = ddoc_cache_entry:start_link(Key),
     Opener1 = element(4, sys:get_state(Entry)),
     Ref1 = erlang:monitor(process, Opener1),
-    gen_server:cast(Entry, refresh),
+    gen_server:cast(Entry, force_refresh),
     receive {'DOWN', Ref1, _, _, _} -> ok end,
     Opener2 = element(4, sys:get_state(Entry)),
     ?assert(Opener2 /= Opener1),
@@ -95,9 +96,27 @@ condenses_access_messages({DbName, _}) ->
 kill_opener_on_terminate(_) ->
     Pid = spawn(fun() -> receive _ -> ok end end),
     ?assert(is_process_alive(Pid)),
-    St = {st, key, val, Pid, waiters, ts},
+    St = {st, key, val, Pid, waiters, ts, accessed},
     ?assertEqual(ok, ddoc_cache_entry:terminate(normal, St)),
     ?assert(not is_process_alive(Pid)).
+
+
+evict_when_not_accessed(_) ->
+    meck:reset(ddoc_cache_ev),
+    Key = {ddoc_cache_entry_custom, {<<"bar">>, ?MODULE}},
+    true = ets:insert_new(?CACHE, #entry{key = Key}),
+    {ok, Entry} = ddoc_cache_entry:start_link(Key),
+    Ref = erlang:monitor(process, Entry),
+    ?assertEqual(1, element(7, sys:get_state(Entry))),
+    ok = gen_server:cast(Entry, refresh),
+
+    meck:wait(ddoc_cache_ev, event, [update_noop, Key], 1000),
+
+    ?assertEqual(0, element(7, sys:get_state(Entry))),
+    ok = gen_server:cast(Entry, refresh),
+    receive {'DOWN', Ref, _, _, Reason} -> Reason end,
+    ?assertEqual(normal, Reason),
+    ?assertEqual(0, ets:info(?CACHE, size)).
 
 
 open_dead_entry({DbName, _}) ->
