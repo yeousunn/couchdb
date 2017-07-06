@@ -90,13 +90,7 @@ check_multi_start(_) ->
     receive {'DOWN', OpenerRef, _, _, _} -> ok end,
     lists:foreach(fun({CPid, Ref}) ->
         receive
-            {'DOWN', Ref, _, _, normal} -> ok;
-            {'DOWN', Ref, _, _, Other} ->
-                io:format(standard_error, "OTHER: ~p~n", [Other]);
-            Other when not is_tuple(Other) orelse element(1, Other) /= 'DOWN' ->
-                io:format(standard_error, "MSG: ~p~n", [Other])
-        after 2000 ->
-            io:format(standard_error, "BLAH?!: ~p ~p", [CPid, process_info(CPid, current_stacktrace)])
+            {'DOWN', Ref, _, _, normal} -> ok
         end
     end, Clients).
 
