@@ -123,11 +123,10 @@ init({Key, Default}) ->
     NewTs = os:timestamp(),
     true = ets:update_element(?CACHE, Key, Updates),
     true = ets:insert(?LRU, {{NewTs, Key, self()}}),
-    Msg = {'$gen_cast', refresh},
     St = #st{
         key = Key,
         val = {open_ok, {ok, Default}},
-        opener = erlang:send_after(?REFRESH_TIMEOUT, self(), Msg),
+        opener = start_timer(),
         waiters = undefined,
         ts = NewTs,
         accessed = 1
@@ -230,11 +229,9 @@ handle_info({'DOWN', _, _, Pid, Resp}, #st{key = Key, opener = Pid} = St) ->
     case Resp of
         {open_ok, Key, {ok, Val}} ->
             update_cache(St, Val),
-            Msg = {'$gen_cast', refresh},
-            Timer = erlang:send_after(?REFRESH_TIMEOUT, self(), Msg),
             NewSt1 = St#st{
                 val = {open_ok, {ok, Val}},
-                opener = Timer
+                opener = start_timer()
             },
             NewSt2 = update_lru(NewSt1),
             if not is_list(St#st.waiters) -> ok; true ->
@@ -265,6 +262,12 @@ code_change(_, St, _) ->
 spawn_opener(Key) ->
     {Pid, _} = erlang:spawn_monitor(?MODULE, do_open, [Key]),
     Pid.
+
+
+start_timer() ->
+    TimeOut = config:get_integer(
+            "ddoc_cache", "refresh_timeout", ?REFRESH_TIMEOUT),
+    erlang:send_after(TimeOut, self(), {'$gen_cast', refresh}).
 
 
 do_open(Key) ->
