@@ -158,6 +158,10 @@ handle_cast({do_refresh, DbName, DDocIdList}, St) ->
     #st{
         dbs = Dbs
     } = St,
+    % We prepend no_ddocid to the DDocIdList below
+    % so that we refresh all custom and validation
+    % function entries which load data from all
+    % design documents.
     case khash:lookup(Dbs, DbName) of
         {value, DDocIds} ->
             lists:foreach(fun(DDocId) ->
