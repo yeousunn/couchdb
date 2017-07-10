@@ -116,7 +116,8 @@ init({Key, undefined}) ->
     ?EVENT(started, Key),
     gen_server:enter_loop(?MODULE, [], St);
 
-init({Key, Default}) ->
+init({Key, Wrapped}) ->
+    Default = ddoc_cache_value:unwrap(Wrapped),
     Updates = [
         {#entry.val, Default},
         {#entry.pid, self()}
@@ -133,7 +134,7 @@ init({Key, Default}) ->
         accessed = 1
     },
     ?EVENT(default_started, Key),
-    gen_server:enter_loop(?MODULE, [], St).
+    gen_server:enter_loop(?MODULE, [], St, hibernate).
 
 
 terminate(_Reason, St) ->

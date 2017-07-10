@@ -72,7 +72,8 @@ open(Key) ->
 insert(Key, Value) ->
     case ets:lookup(?CACHE, Key) of
         [] ->
-            gen_server:call(?MODULE, {start, Key, Value}, infinity);
+            Wrapped = ddoc_cache_value:wrap(Value),
+            gen_server:call(?MODULE, {start, Key, Wrapped}, infinity);
         [#entry{}] ->
             ok
     end.
