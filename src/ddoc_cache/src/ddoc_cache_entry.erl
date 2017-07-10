@@ -12,6 +12,7 @@
 
 -module(ddoc_cache_entry).
 -behaviour(gen_server).
+-vsn(1).
 
 
 -export([
