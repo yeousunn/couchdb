@@ -99,7 +99,7 @@ init(_) ->
 
 terminate(_Reason, St) ->
     case is_pid(St#st.evictor) of
-        true -> catch exit(St#st.evictor, kill);
+        true -> exit(St#st.evictor, kill);
         false -> ok
     end,
     ok.
