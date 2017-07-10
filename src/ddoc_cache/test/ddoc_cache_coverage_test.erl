@@ -26,7 +26,7 @@ coverage_test_() ->
         [
             fun restart_lru/0,
             fun restart_tables/0,
-            fun restart_evictor/0
+            fun stop_on_evictor_death/0
         ]
     }.
 
@@ -43,22 +43,20 @@ restart_tables() ->
     ?assertEqual({ok, foo}, ddoc_cache_tables:code_change(1, foo, [])).
 
 
-restart_evictor() ->
+stop_on_evictor_death() ->
     meck:new(ddoc_cache_ev, [passthrough]),
     try
-        State = sys:get_state(ddoc_cache_lru),
+        Lru = whereis(ddoc_cache_lru),
+        State = sys:get_state(Lru),
         Evictor = element(4, State),
-        Ref = erlang:monitor(process, Evictor),
+        Ref = erlang:monitor(process, Lru),
         exit(Evictor, shutdown),
         receive
             {'DOWN', Ref, _, _, Reason} ->
-                couch_log:error("MONITOR: ~p", [Reason]),
-                ok
+                ?assertEqual(shutdown, Reason)
         end,
-        meck:wait(ddoc_cache_ev, event, [evictor_died, '_'], 1000),
-        NewState = sys:get_state(ddoc_cache_lru),
-        NewEvictor = element(4, NewState),
-        ?assertNotEqual(Evictor, NewEvictor)
+        meck:wait(ddoc_cache_ev, event, [lru_init, '_'], 1000),
+        ?assert(whereis(ddoc_cache_lru) /= Lru)
     after
         meck:unload()
     end.

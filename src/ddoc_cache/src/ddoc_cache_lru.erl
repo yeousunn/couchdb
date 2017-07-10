@@ -89,6 +89,7 @@ init(_) ->
     {ok, Evictor} = couch_event:link_listener(
             ?MODULE, handle_db_event, nil, [all_dbs]
         ),
+    ?EVENT(lru_init, nil),
     {ok, #st{
         pids = Pids,
         dbs = Dbs,
@@ -191,12 +192,8 @@ handle_cast(Msg, St) ->
     {stop, {invalid_cast, Msg}, St}.
 
 
-handle_info({'EXIT', Pid, _Reason}, #st{evictor = Pid} = St) ->
-    ?EVENT(evictor_died, Pid),
-    {ok, Evictor} = couch_event:link_listener(
-            ?MODULE, handle_db_event, nil, [all_dbs]
-        ),
-    {noreply, St#st{evictor=Evictor}};
+handle_info({'EXIT', Pid, Reason}, #st{evictor = Pid} = St) ->
+    {stop, Reason, St};
 
 handle_info({'EXIT', Pid, normal}, St) ->
     % This clause handles when an entry starts
