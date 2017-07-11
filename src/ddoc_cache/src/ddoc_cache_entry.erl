@@ -196,6 +196,10 @@ handle_cast(force_refresh, St) ->
     NewSt = if St#st.accessed > 0 -> St; true ->
         St#st{accessed = 1}
     end,
+    % We remove the cache entry value so that any
+    % new client comes to us for the refreshed
+    % value.
+    true = ets:update_element(?CACHE, St#st.key, {#entry.value, undefined}),
     handle_cast(refresh, NewSt);
 
 handle_cast(refresh, #st{accessed = 0} = St) ->
