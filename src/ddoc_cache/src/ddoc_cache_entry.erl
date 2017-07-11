@@ -129,7 +129,7 @@ init({Key, Wrapped}) ->
         key = Key,
         val = {open_ok, {ok, Default}},
         opener = start_timer(),
-        waiters = undefined,
+        waiters = [],
         ts = NewTs,
         accessed = 1
     },
@@ -161,7 +161,7 @@ terminate(_Reason, St) ->
     ok.
 
 
-handle_call(open, From, #st{val = undefined} = St) ->
+handle_call(open, From, #st{opener = Pid} = St) when is_pid(Pid) ->
     NewSt = St#st{
         waiters = [From | St#st.waiters]
     },
@@ -234,12 +234,10 @@ handle_info({'DOWN', _, _, Pid, Resp}, #st{key = Key, opener = Pid} = St) ->
             NewSt1 = St#st{
                 val = {open_ok, {ok, Val}},
                 opener = start_timer(),
-                waiters = undefined
+                waiters = []
             },
             NewSt2 = update_lru(NewSt1),
-            if not is_list(St#st.waiters) -> ok; true ->
-                respond(St#st.waiters, {open_ok, {ok, Val}})
-            end,
+            respond(St#st.waiters, {open_ok, {ok, Val}}),
             {noreply, NewSt2};
         {Status, Key, Other} ->
             NewSt = St#st{
@@ -248,9 +246,7 @@ handle_info({'DOWN', _, _, Pid, Resp}, #st{key = Key, opener = Pid} = St) ->
                 waiters = undefined
             },
             remove_from_cache(NewSt),
-            if not is_list(St#st.waiters) -> ok; true ->
-                respond(St#st.waiters, {Status, Other})
-            end,
+            respond(St#st.waiters, {Status, Other}),
             {stop, normal, NewSt}
     end;
 

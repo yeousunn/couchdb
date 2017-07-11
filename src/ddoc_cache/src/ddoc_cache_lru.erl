@@ -177,7 +177,12 @@ handle_cast({do_refresh, DbName, DDocIdList}, St) ->
             lists:foreach(fun(DDocId) ->
                 case khash:lookup(DDocIds, DDocId) of
                     {value, Keys} ->
-                        khash:fold(Keys, fun(_, Pid, _) ->
+                        khash:fold(Keys, fun(Key, Pid, _) ->
+                            % We're erasing the value from cache here
+                            % so that new clients will wait for the
+                            % refresh to complete.
+                            Op = [{#entry.val, undefined}],
+                            true = ets:update_element(?CACHE, Key, Op),
                             ddoc_cache_entry:refresh(Pid)
                         end, nil);
                     not_found ->
