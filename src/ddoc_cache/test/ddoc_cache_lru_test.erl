@@ -27,13 +27,15 @@ recover(<<"pause", _/binary>>) ->
     receive go -> ok end,
     {ok, paused};
 
+recover(<<"big", _/binary>>) ->
+    {ok, [random:uniform() || _ <- lists:seq(1, 8192)]};
+
 recover(DbName) ->
     {ok, DbName}.
 
 
 start_couch() ->
     Ctx = ddoc_cache_tutil:start_couch(),
-    config:set("ddoc_cache", "max_size", "5", false),
     meck:new(ddoc_cache_ev, [passthrough]),
     Ctx.
 
@@ -63,7 +65,6 @@ check_lru_test_() ->
             fun check_multi_start/1,
             fun check_multi_open/1,
             fun check_capped_size/1,
-            fun check_full_cache/1,
             fun check_cache_refill/1
         ]}
     }.
@@ -127,39 +128,27 @@ check_multi_open(_) ->
 
 
 check_capped_size(_) ->
+    % The extra factor of two in the size checks is
+    % a fudge factor. We don't reject entries from
+    % the cache if they would put us over the limit
+    % as we don't have the size information a
+    % priori.
+    config:set("ddoc_cache", "max_size", "1048576", false),
+    MaxSize = 1048576,
     ddoc_cache_tutil:clear(),
     meck:reset(ddoc_cache_ev),
     lists:foreach(fun(I) ->
-        DbName = list_to_binary(integer_to_list(I)),
+        DbName = list_to_binary("big_" ++ integer_to_list(I)),
         ddoc_cache:open_custom(DbName, ?MODULE),
         meck:wait(I, ddoc_cache_ev, event, [started, '_'], 1000),
-        ?assertEqual(I, ets:info(?CACHE, size))
-    end, lists:seq(1, 5)),
+        ?assert(cache_size() < MaxSize * 2)
+    end, lists:seq(1, 25)),
     lists:foreach(fun(I) ->
-        DbName = list_to_binary(integer_to_list(I)),
+        DbName = list_to_binary("big_" ++ integer_to_list(I)),
         ddoc_cache:open_custom(DbName, ?MODULE),
         meck:wait(I, ddoc_cache_ev, event, [started, '_'], 1000),
-        ?assertEqual(5, ets:info(?CACHE, size))
-    end, lists:seq(6, 20)).
-
-
-check_full_cache(_) ->
-    ddoc_cache_tutil:clear(),
-    meck:reset(ddoc_cache_ev),
-    lists:foreach(fun(I) ->
-        DbSuffix = list_to_binary(integer_to_list(I)),
-        DbName = <<"pause", DbSuffix/binary>>,
-        spawn(fun() -> ddoc_cache:open_custom(DbName, ?MODULE) end),
-        meck:wait(I, ddoc_cache_ev, event, [started, '_'], 1000),
-        ?assertEqual(I, ets:info(?CACHE, size))
-    end, lists:seq(1, 5)),
-    lists:foreach(fun(I) ->
-        DbSuffix = list_to_binary(integer_to_list(I)),
-        DbName = <<"pause", DbSuffix/binary>>,
-        spawn(fun() -> ddoc_cache:open_custom(DbName, ?MODULE) end),
-        meck:wait(I - 5, ddoc_cache_ev, event, [full, '_'], 1000),
-        ?assertEqual(5, ets:info(?CACHE, size))
-    end, lists:seq(6, 20)).
+        ?assert(cache_size() < MaxSize * 2)
+    end, lists:seq(26, 100)).
 
 
 check_cache_refill({DbName, _}) ->
@@ -193,3 +182,7 @@ check_cache_refill({DbName, _}) ->
         meck:wait(ddoc_cache_ev, event, [started, Key], 1000),
         ?assert(ets:info(?CACHE, size) > 0)
     end, lists:seq(6, 10)).
+
+
+cache_size() ->
+    ets:info(?CACHE, memory) * erlang:system_info(wordsize).

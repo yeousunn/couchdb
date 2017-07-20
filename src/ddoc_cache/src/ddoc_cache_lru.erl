@@ -113,9 +113,8 @@ handle_call({start, Key, Default}, _From, St) ->
     } = St,
     case ets:lookup(?CACHE, Key) of
         [] ->
-            MaxSize = config:get_integer("ddoc_cache", "max_size", 1000),
-            CurSize = ets:info(?CACHE, size),
-            case trim(St, CurSize, max(0, MaxSize)) of
+            MaxSize = config:get_integer("ddoc_cache", "max_size", 104857600),
+            case trim(St, max(0, MaxSize)) of
                 ok ->
                     true = ets:insert_new(?CACHE, #entry{key = Key}),
                     {ok, Pid} = ddoc_cache_entry:start_link(Key, Default),
@@ -243,19 +242,20 @@ lru_start(Key, DoInsert) ->
     end.
 
 
-trim(_, _, 0) ->
+trim(_, 0) ->
     full;
 
-trim(_St, CurSize, MaxSize) when CurSize < MaxSize ->
-    ok;
-
-trim(St, CurSize, MaxSize) when CurSize >= MaxSize ->
-    case ets:first(?LRU) of
-        '$end_of_table' ->
-            full;
-        {_Ts, Key, Pid} ->
-            remove_entry(St, Key, Pid),
-            trim(St, CurSize - 1, MaxSize)
+trim(St, MaxSize) ->
+    CurSize = ets:info(?CACHE, memory) * erlang:system_info(wordsize),
+    couch_log:error("SIZE: ~b :: ~b~n", [CurSize, MaxSize]),
+    if CurSize =< MaxSize -> ok; true ->
+        case ets:first(?LRU) of
+            '$end_of_table' ->
+                full;
+            {_Ts, Key, Pid} ->
+                remove_entry(St, Key, Pid),
+                trim(St, MaxSize)
+        end
     end.
 
 
