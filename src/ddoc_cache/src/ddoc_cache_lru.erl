@@ -177,7 +177,7 @@ handle_cast({do_refresh, DbName, DDocIdList}, St) ->
             lists:foreach(fun(DDocId) ->
                 case khash:lookup(DDocIds, DDocId) of
                     {value, Keys} ->
-                        khash:fold(Keys, fun(Key, Pid, _) ->
+                        khash:fold(Keys, fun(_, Pid, _) ->
                             ddoc_cache_entry:refresh(Pid)
                         end, nil);
                     not_found ->
