@@ -45,6 +45,13 @@
 -include("ddoc_cache.hrl").
 
 
+-ifndef(TEST).
+-define(ENTRY_SHUTDOWN_TIMEOUT, 5000).
+-else.
+-define(ENTRY_SHUTDOWN_TIMEOUT, 500).
+-endif.
+
+
 -record(st, {
     key,
     val,
@@ -77,7 +84,17 @@ start_link(Key, Default) ->
 
 
 shutdown(Pid) ->
-    ok = gen_server:call(Pid, shutdown).
+    Ref = erlang:monitor(process, Pid),
+    ok = gen_server:cast(Pid, shutdown),
+    receive
+        {'DOWN', Ref, process, Pid, normal} ->
+            ok;
+        {'DOWN', Ref, process, Pid, Reason} ->
+            erlang:exit(Reason)
+    after ?ENTRY_SHUTDOWN_TIMEOUT ->
+        erlang:demonitor(Ref, [flush]),
+        erlang:exit({timeout, {entry_shutdown, Pid}})
+    end.
 
 
 open(Pid, Key) ->
@@ -170,10 +187,6 @@ handle_call(open, From, #st{opener = Pid} = St) when is_pid(Pid) ->
 handle_call(open, _From, St) ->
     {reply, St#st.val, St};
 
-handle_call(shutdown, _From, St) ->
-    remove_from_cache(St),
-    {stop, normal, ok, St};
-
 handle_call(Msg, _From, St) ->
     {stop, {bad_call, Msg}, {bad_call, Msg}, St}.
 
@@ -226,6 +239,10 @@ handle_cast(refresh, #st{opener = Pid} = St) when is_pid(Pid) ->
         accessed = 0
     },
     {noreply, NewSt};
+
+handle_cast(shutdown, St) ->
+    remove_from_cache(St),
+    {stop, normal, St};
 
 handle_cast(Msg, St) ->
     {stop, {bad_cast, Msg}, St}.

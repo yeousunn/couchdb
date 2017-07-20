@@ -137,3 +137,21 @@ handles_bad_messages(_) ->
 handles_code_change(_) ->
     CCExpect = {ok, bar},
     ?assertEqual(CCExpect, ddoc_cache_entry:code_change(foo, bar, baz)).
+
+
+handles_bad_shutdown_test_() ->
+    {timeout, 10, ?_test(begin
+        ErrorPid = spawn(fun() ->
+            receive
+               _ -> exit(bad_shutdown)
+            end
+        end),
+        ?assertExit(bad_shutdown, ddoc_cache_entry:shutdown(ErrorPid)),
+        NotDeadYetPid = spawn(fun() ->
+            timer:sleep(infinity)
+        end),
+        ?assertExit(
+                {timeout, {entry_shutdown, NotDeadYetPid}},
+                ddoc_cache_entry:shutdown(NotDeadYetPid)
+            )
+    end)}.
