@@ -301,10 +301,7 @@ do_open(Key) ->
 
 
 update_lru(#st{key = Key, ts = Ts} = St) ->
-    if Ts == undefined -> ok; true ->
-        MSpec = [{{{Ts, Key, self()}}, [], [true]}],
-        1 = ets:select_delete(?LRU, MSpec)
-    end,
+    remove_from_lru(Ts, Key),
     NewTs = os:timestamp(),
     true = ets:insert(?LRU, {{NewTs, Key, self()}}),
     St#st{ts = NewTs}.
@@ -330,12 +327,16 @@ remove_from_cache(St) ->
     Pattern = #entry{key = Key, pid = self(), _ = '_'},
     CacheMSpec = [{Pattern, [], [true]}],
     1 = ets:select_delete(?CACHE, CacheMSpec),
+    remove_from_lru(Ts, Key),
+    ?EVENT(removed, St#st.key),
+    ok.
+
+
+remove_from_lru(Ts, Key) ->
     if Ts == undefined -> ok; true ->
         LruMSpec = [{{{Ts, Key, self()}}, [], [true]}],
         1 = ets:select_delete(?LRU, LruMSpec)
-    end,
-    ?EVENT(removed, St#st.key),
-    ok.
+    end.
 
 
 drain_accessed() ->
