@@ -18,7 +18,6 @@
 
 -export([start_link/1, init_p/2, init_p/3]).
 
--include_lib("rexi/include/rexi.hrl").
 
 -record(job, {
     client::reference(),
@@ -27,12 +26,14 @@
     worker_pid::pid()
 }).
 
+-record(error, {
+    reason,
+    stack
+}).
+
 -record(st, {
     workers = ets:new(workers, [private, {keypos, #job.worker}]),
-    clients = ets:new(clients, [private, {keypos, #job.client}]),
-    errors = queue:new(),
-    error_limit = 0,
-    error_count = 0
+    clients = ets:new(clients, [private, {keypos, #job.client}])
 }).
 
 start_link(ServerId) ->
@@ -41,24 +42,6 @@ start_link(ServerId) ->
 init([]) ->
     {ok, #st{}}.
 
-handle_call(get_errors, _From, #st{errors = Errors} = St) ->
-    {reply, {ok, lists:reverse(queue:to_list(Errors))}, St};
-
-handle_call(get_last_error, _From, #st{errors = Errors} = St) ->
-    try
-        {reply, {ok, queue:get_r(Errors)}, St}
-    catch error:empty ->
-        {reply, {error, empty}, St}
-    end;
-
-handle_call({set_error_limit, N}, _From, #st{error_count=Len, errors=Q} = St) ->
-    if N < Len ->
-        {NewQ, _} = queue:split(N, Q);
-    true ->
-        NewQ = Q
-    end,
-    NewLen = queue:len(NewQ),
-    {reply, ok, St#st{error_limit=N, error_count=NewLen, errors=NewQ}};
 
 handle_call(_Request, _From, St) ->
     {reply, ignored, St}.
@@ -103,14 +86,14 @@ handle_info({'DOWN', Ref, process, _, normal}, #st{workers=Workers} = St) ->
 handle_info({'DOWN', Ref, process, Pid, Error}, #st{workers=Workers} = St) ->
     case find_worker(Ref, Workers) of
     #job{worker_pid=Pid, worker=Ref, client_pid=CPid, client=CRef} =Job ->
-        case Error of #error{reason = {_Class, Reason}, stack = Stack} ->
-            notify_caller({CPid, CRef}, {Reason, Stack}),
-            St1 = save_error(Error, St),
-            {noreply, remove_job(Job, St1)};
-        _ ->
-            notify_caller({CPid, CRef}, Error),
-            {noreply, remove_job(Job, St)}
-        end;
+        Msg = case Error of
+            #error{reason = {_Class, Reason}, stack = Stack} ->
+                {Reason, Stack};
+            Else ->
+                Else
+        end,
+        notify_caller({CPid, CRef}, Msg),
+        {noreply, remove_job(Job, St)};
     false ->
         {noreply, St}
     end;
@@ -138,24 +121,15 @@ init_p(From, {M,F,A}, Nonce) ->
     put(nonce, Nonce),
     try apply(M, F, A) catch exit:normal -> ok; Class:Reason ->
         Stack = clean_stack(),
-        couch_log:error("rexi_server ~p:~p ~100p", [Class, Reason, Stack]),
+        Args = [M, F, length(A), Class, Reason, Stack],
+        couch_log:error("rexi_server ~s:~s/~b :: ~p:~p ~100p", Args),
         exit(#error{
-            timestamp = now(),
             reason = {Class, Reason},
-            mfa = {M,F,A},
-            nonce = Nonce,
             stack = Stack
         })
     end.
 
 %% internal
-
-save_error(_E, #st{error_limit = 0} = St) ->
-    St;
-save_error(E, #st{errors=Q, error_limit=L, error_count=C} = St) when C >= L ->
-    St#st{errors = queue:in(E, queue:drop(Q))};
-save_error(E, #st{errors=Q, error_count=C} = St) ->
-    St#st{errors = queue:in(E, Q), error_count = C+1}.
 
 clean_stack() ->
     lists:map(fun({M,F,A}) when is_list(A) -> {M,F,length(A)}; (X) -> X end,
