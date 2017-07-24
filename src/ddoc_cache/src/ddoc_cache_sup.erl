@@ -27,14 +27,6 @@ start_link() ->
 init([]) ->
     Children = [
         {
-            ddoc_cache_tables,
-            {ddoc_cache_tables, start_link, []},
-            permanent,
-            5000,
-            worker,
-            [ddoc_cache_tables]
-        },
-        {
             ddoc_cache_lru,
             {ddoc_cache_lru, start_link, []},
             permanent,
@@ -51,4 +43,4 @@ init([]) ->
             [ddoc_cache_opener]
         }
     ],
-    {ok, {{one_for_all, 25, 1}, Children}}.
+    {ok, {{one_for_one, 25, 1}, Children}}.

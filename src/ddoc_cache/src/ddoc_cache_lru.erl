@@ -85,6 +85,14 @@ refresh(DbName, DDocIds) ->
 
 init(_) ->
     process_flag(trap_exit, true),
+    BaseOpts = [public, named_table],
+    CacheOpts = [
+        set,
+        {read_concurrency, true},
+        {keypos, #entry.key}
+    ] ++ BaseOpts,
+    ets:new(?CACHE, CacheOpts),
+    ets:new(?LRU, [ordered_set, {write_concurrency, true}] ++ BaseOpts),
     {ok, Pids} = khash:new(),
     {ok, Dbs} = khash:new(),
     {ok, Evictor} = couch_event:link_listener(

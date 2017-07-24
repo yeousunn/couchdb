@@ -25,7 +25,6 @@ coverage_test_() ->
         fun ddoc_cache_tutil:stop_couch/1,
         [
             fun restart_lru/0,
-            fun restart_tables/0,
             fun stop_on_evictor_death/0
         ]
     }.
@@ -35,12 +34,6 @@ restart_lru() ->
     send_bad_messages(ddoc_cache_lru),
     ?assertEqual(ok, ddoc_cache_lru:terminate(bang, {st, a, b, c})),
     ?assertEqual({ok, foo}, ddoc_cache_lru:code_change(1, foo, [])).
-
-
-restart_tables() ->
-    send_bad_messages(ddoc_cache_tables),
-    ?assertEqual(ok, ddoc_cache_tables:terminate(bang, baz)),
-    ?assertEqual({ok, foo}, ddoc_cache_tables:code_change(1, foo, [])).
 
 
 stop_on_evictor_death() ->
