@@ -258,11 +258,11 @@ trim(St, MaxSize) ->
     couch_log:error("SIZE: ~b :: ~b~n", [CurSize, MaxSize]),
     if CurSize =< MaxSize -> ok; true ->
         case ets:first(?LRU) of
-            '$end_of_table' ->
-                full;
             {_Ts, Key, Pid} ->
                 remove_entry(St, Key, Pid),
-                trim(St, MaxSize)
+                trim(St, MaxSize);
+            '$end_of_table' ->
+                full
         end
     end.
 
