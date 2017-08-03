@@ -227,6 +227,10 @@ handle_config_change("couchdb", "max_dbs_open", _, _, _) ->
 handle_config_change("admins", _, _, Persist, _) ->
     % spawn here so couch event manager doesn't deadlock
     {ok, spawn(fun() -> hash_admin_passwords(Persist) end)};
+handle_config_change("disabled_dbs", _DbName, "", _, _) ->
+    {ok, nil};
+handle_config_change("disabled_dbs", DbName, _, _, _) ->
+    {ok, gen_server:call(couch_server, {close_db, list_to_binary(DbName)})};
 handle_config_change("httpd", "authentication_handlers", _, _, _) ->
     {ok, couch_httpd:stop()};
 handle_config_change("httpd", "bind_address", _, _, _) ->
@@ -302,6 +306,15 @@ open_async(Server, From, DbName, Filepath, Options) ->
     Parent = self(),
     T0 = os:timestamp(),
     Opener = spawn_link(fun() ->
+        case config:get("disabled_dbs", binary_to_list(DbName), "false") of
+            "false" ->
+                ok;
+            _ ->
+                Msg = {open_result, T0, DbName, disabled},
+                gen_server:call(Parent, Msg, infinity),
+                unlink(Parent),
+                exit(normal)
+        end,
         Res = couch_db:start_link(DbName, Filepath, Options),
         case {Res, lists:member(create, Options)} of
             {{ok, _Db}, true} ->
@@ -512,7 +525,25 @@ handle_call({db_updated, #db{}=Db}, _From, Server0) ->
     catch _:_ ->
         Server0
     end,
-    {reply, ok, Server}.
+    {reply, ok, Server};
+handle_call({close_db, DbName}, _From, Server0) ->
+    Server1 = case ets:lookup(couch_dbs, DbName) of
+        [] ->
+            Server0;
+        [#db{main_pid=Pid, compactor_pid=Froms} = Db] when is_list(Froms) ->
+            % icky hack of field values - compactor_pid used to store clients
+            true = ets:delete(couch_dbs, DbName),
+            true = ets:delete(couch_dbs_pid_to_name, Pid),
+            exit(Pid, kill),
+            [gen_server:reply(F, disabled) || F <- Froms],
+            db_closed(Server0, Db#db.options);
+        [#db{main_pid=Pid} = Db] ->
+            true = ets:delete(couch_dbs, DbName),
+            true = ets:delete(couch_dbs_pid_to_name, Pid),
+            exit(Pid, kill),
+            db_closed(Server0, Db#db.options)
+    end,
+    {reply, ok, Server1}.
 
 handle_cast({update_lru, DbName}, #server{lru = Lru, update_lru_on_read=true} = Server) ->
     {noreply, Server#server{lru = couch_lru:update(DbName, Lru)}};
