@@ -129,7 +129,7 @@ append_term_md5(Fd, Term, Options) ->
 
 append_binary(Fd, Bin) ->
     ioq:call(Fd, {append_bin, assemble_file_chunk(Bin)}, erlang:get(io_priority)).
-    
+
 append_binary_md5(Fd, Bin) ->
     ioq:call(Fd,
         {append_bin, assemble_file_chunk(Bin, crypto:hash(md5, Bin))},
@@ -358,7 +358,7 @@ init({Filepath, Options, ReturnPid, Ref}) ->
     Limit = get_pread_limit(),
     IsSys = lists:member(sys_db, Options),
     update_read_timestamp(),
-    case lists:member(create, Options) of
+    InitStatus = case lists:member(create, Options) of
     true ->
         filelib:ensure_dir(Filepath),
         case file:open(Filepath, OpenOptions) of
@@ -406,7 +406,12 @@ init({Filepath, Options, ReturnPid, Ref}) ->
         Error ->
             init_status_error(ReturnPid, Ref, Error)
         end
-    end.
+    end,
+    case InitStatus of
+        {ok, _} -> ok = create_couch_file_metrics(Filepath);
+        _ -> ok
+    end,
+    InitStatus.
 
 file_open_options(Options) ->
     [read, raw, binary] ++ case lists:member(read_only, Options) of
@@ -427,6 +432,19 @@ maybe_track_open_os_files(Options) ->
 terminate(_Reason, #file{fd = nil}) ->
     ok;
 terminate(_Reason, #file{fd = Fd}) ->
+    Filepath = erlang:get(metrics_name),
+    Metrics = [
+        {counter, ["reads", "count"]},
+        {counter, ["reads", "bytes"]},
+        {histogram, ["reads", "latency"]},
+        {counter, ["writes", "count"]},
+        {counter, ["writes", "bytes"]},
+        {histogram, ["writes", "latency"]}
+    ],
+    lists:foreach(fun({_, Name0}) ->
+        Name = ["transient", "couch_file", Filepath | Name0],
+        couch_stats:delete(Name)
+    end, Metrics),
     ok = file:close(Fd).
 
 handle_call(Msg, From, File) when ?IS_OLD_STATE(File) ->
@@ -437,8 +455,9 @@ handle_call(close, _From, #file{fd=Fd}=File) ->
 
 handle_call({pread_iolist, Pos}, _From, File) ->
     update_read_timestamp(),
+    T0 = os:timestamp(),
     {LenIolist, NextPos} = read_raw_iolist_int(File, Pos, 4),
-    case iolist_to_binary(LenIolist) of
+    Res = case iolist_to_binary(LenIolist) of
     <<1:1/integer,Len:31/integer>> -> % an MD5-prefixed term
         {Md5AndIoList, _} = read_raw_iolist_int(File, NextPos, Len+16),
         {Md5, IoList} = extract_md5(Md5AndIoList),
@@ -446,7 +465,11 @@ handle_call({pread_iolist, Pos}, _From, File) ->
     <<0:1/integer,Len:31/integer>> ->
         {Iolist, _} = read_raw_iolist_int(File, NextPos, Len),
         {reply, {ok, Iolist, <<>>}, File}
-    end;
+    end,
+    T1 = os:timestamp(),
+    Delta = timer:now_diff(T1, T0) div 1000,
+    ok = update_read_metrics(iolist_size(LenIolist), Delta),
+    Res;
 
 handle_call(bytes, _From, #file{fd = Fd} = File) ->
     {reply, file:position(Fd, eof), File};
@@ -472,14 +495,19 @@ handle_call({truncate, Pos}, _From, #file{fd=Fd}=File) ->
     end;
 
 handle_call({append_bin, Bin}, _From, #file{fd = Fd, eof = Pos} = File) ->
+    T0 = os:timestamp(),
     Blocks = make_blocks(Pos rem ?SIZE_BLOCK, Bin),
     Size = iolist_size(Blocks),
-    case file:write(Fd, Blocks) of
+    Res = case file:write(Fd, Blocks) of
     ok ->
         {reply, {ok, Pos, Size}, File#file{eof = Pos + Size}};
     Error ->
         {reply, Error, reset_eof(File)}
-    end;
+    end,
+    T1 = os:timestamp(),
+    Delta = timer:now_diff(T1, T0) div 1000,
+    ok = update_write_metrics(Size, Delta),
+    Res;
 
 handle_call({write_header, Bin}, _From, #file{fd = Fd, eof = Pos} = File) ->
     BinSize = byte_size(Bin),
@@ -501,6 +529,19 @@ handle_call(find_header, _From, #file{fd = Fd, eof = Pos} = File) ->
     {reply, find_header(Fd, Pos div ?SIZE_BLOCK), File}.
 
 handle_cast(close, Fd) ->
+    Filepath = erlang:get(metrics_name),
+    Metrics = [
+        {counter, ["reads", "count"]},
+        {counter, ["reads", "bytes"]},
+        {histogram, ["reads", "latency"]},
+        {counter, ["writes", "count"]},
+        {counter, ["writes", "bytes"]},
+        {histogram, ["writes", "latency"]}
+    ],
+    lists:foreach(fun({_, Name0}) ->
+        Name = ["transient", "couch_file", Filepath | Name0],
+        couch_stats:delete(Name)
+    end, Metrics),
     {stop,normal,Fd}.
 
 code_change(_OldVsn, State, _Extra) ->
@@ -732,6 +773,36 @@ get_pread_limit() ->
 reset_eof(#file{} = File) ->
     {ok, Eof} = file:position(File#file.fd, eof),
     File#file{eof = Eof}.
+
+create_couch_file_metrics(Filepath0) ->
+    %% Drop .couch and .suffix
+    Filepath = filename:rootname(filename:rootname(Filepath0)),
+    erlang:put(metrics_name, Filepath),
+    Metrics = [
+        {counter, ["reads", "count"]},
+        {counter, ["reads", "bytes"]},
+        {histogram, ["reads", "latency"]},
+        {counter, ["writes", "count"]},
+        {counter, ["writes", "bytes"]},
+        {histogram, ["writes", "latency"]}
+    ],
+    lists:foreach(fun({Type, Name0}) ->
+        Name = ["transient", "couch_file", Filepath | Name0],
+        ok = couch_stats:new(Type, Name)
+    end, Metrics).
+
+update_read_metrics(Bytes, Delta) ->
+    update_metrics("reads", Bytes, Delta).
+
+update_write_metrics(Bytes, Delta) ->
+    update_metrics("writes", Bytes, Delta).
+
+update_metrics(Type, Bytes, Delta) ->
+    Name = erlang:get(metrics_name),
+    catch couch_stats:increment_counter(["transient", "couch_file", Name, Type, "count"]),
+    catch couch_stats:increment_counter(["transient", "couch_file", Name, Type, "bytes"], Bytes),
+    catch couch_stats:update_histogram(["transient", "couch_file", Name, Type, "latency"], Delta),
+    ok.
 
 -ifdef(TEST).
 -include_lib("couch/include/couch_eunit.hrl").

@@ -16,6 +16,7 @@
     start/0,
     stop/0,
     fetch/0,
+    fetch_transient/0,
     reload/0,
     sample/1,
     new/2,
@@ -44,6 +45,9 @@ stop() ->
 
 fetch() ->
     couch_stats_aggregator:fetch().
+
+fetch_transient() ->
+    couch_stats_aggregator:fetch_transient().
 
 reload() ->
     couch_stats_aggregator:reload().

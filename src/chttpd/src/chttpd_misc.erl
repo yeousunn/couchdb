@@ -332,6 +332,16 @@ handle_node_req(#httpd{method='GET', path_parts=[_, Node, <<"_stats">> | Path]}=
     chttpd:send_json(Req, EJSON1);
 handle_node_req(#httpd{path_parts=[_, _Node, <<"_stats">>]}=Req) ->
     send_method_not_allowed(Req, "GET");
+handle_node_req(#httpd{method='GET', path_parts=[_, Node, <<"_transient_stats">> | Path]}=Req) ->
+    flush(Node, Req),
+    Stats0 = call_node(Node, couch_stats, fetch_transient, []),
+    Stats = couch_stats_httpd:transform_stats(Stats0),
+    Nested = couch_stats_httpd:nest(Stats),
+    EJSON0 = couch_stats_httpd:to_ejson(Nested),
+    EJSON1 = couch_stats_httpd:extract_path(Path, EJSON0),
+    chttpd:send_json(Req, EJSON1);
+handle_node_req(#httpd{path_parts=[_, _Node, <<"_transient_stats">>]}=Req) ->
+    send_method_not_allowed(Req, "GET");
 % GET /_node/$node/_system
 handle_node_req(#httpd{method='GET', path_parts=[_, Node, <<"_system">>]}=Req) ->
     Stats = call_node(Node, chttpd_misc, get_stats, []),

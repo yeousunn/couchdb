@@ -16,6 +16,7 @@
 
 -export([
     fetch/0,
+    fetch_transient/0,
     flush/0,
     reload/0
 ]).
@@ -36,12 +37,17 @@
 -record(st, {
     descriptions,
     stats,
+    tstats,
     collect_timer,
     reload_timer
 }).
 
 fetch() ->
     {ok, Stats} = gen_server:call(?MODULE, fetch),
+    Stats.
+
+fetch_transient() ->
+    {ok, Stats} = gen_server:call(?MODULE, fetch_transient),
     Stats.
 
 flush() ->
@@ -58,10 +64,12 @@ init([]) ->
     Interval = config:get_integer("stats", "interval", ?DEFAULT_INTERVAL),
     {ok, CT} = timer:send_interval(Interval * 1000, self(), collect),
     {ok, RT} = timer:send_interval(?RELOAD_INTERVAL * 1000, self(), reload),
-    {ok, #st{descriptions=Descs, stats=[], collect_timer=CT, reload_timer=RT}}.
+    {ok, #st{descriptions=Descs, stats=[], tstats=[], collect_timer=CT, reload_timer=RT}}.
 
 handle_call(fetch, _from, #st{stats = Stats}=State) ->
     {reply, {ok, Stats}, State};
+handle_call(fetch_transient, _from, #st{tstats = TStats}=State) ->
+    {reply, {ok, TStats}, State};
 handle_call(flush, _From, State) ->
     {reply, ok, collect(State)};
 handle_call(reload, _from, State) ->
@@ -147,4 +155,15 @@ collect(State) ->
         end,
         State#st.descriptions
     ),
-    State#st{stats=Stats}.
+    TStats = lists:foldl(
+        fun
+            ({["transient" | _] = Name, Props0}, Acc) ->
+                Props = proplists:delete(tags, Props0),
+                [{Name, [{value, couch_stats:sample(Name)}|Props]} | Acc];
+            (_, Acc) ->
+                Acc
+        end,
+        [],
+        folsom_metrics:get_metrics_info()
+    ),
+    State#st{stats=Stats, tstats=TStats}.
