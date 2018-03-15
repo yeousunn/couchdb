@@ -21,7 +21,8 @@
 -define(CONTENT_JSON, {"Content-Type", "application/json"}).
 -define(DESTHEADER1, {"Destination", "foo%E5%95%8Abar"}).
 -define(DESTHEADER2, {"Destination", "foo%2Fbar%23baz%3Fpow%3Afiz"}).
-
+-define(DDOC, "{\"_id\": \"_design/bar\", \"views\": {\"baz\":
+               {\"map\": \"function(doc) {emit(doc._id, doc._id);}\"}}}").
 
 -define(FIXTURE_TXT, ?ABS_PATH(?FILE)).
 -define(i2l(I), integer_to_list(I)).
@@ -71,7 +72,18 @@ all_test_() ->
                     fun should_return_update_seq_when_set_on_all_docs/1,
                     fun should_not_return_update_seq_when_unset_on_all_docs/1,
                     fun should_return_correct_id_on_doc_copy/1,
-                    fun should_return_400_for_bad_engine/1
+                    fun should_return_400_for_bad_engine/1,
+                    fun should_succeed_on_all_docs_with_queries_keys/1,
+                    fun should_succeed_on_all_docs_with_queries_limit_skip/1,
+                    fun should_succeed_on_all_docs_with_multiple_queries/1,
+                    fun should_succeed_on_design_docs_with_queries_keys/1,
+                    fun should_succeed_on_design_docs_with_queries_limit_skip/1,
+                    fun should_succeed_on_design_docs_with_multiple_queries/1,
+                    fun should_succeed_on_local_docs_with_queries_keys/1,
+                    fun should_succeed_on_local_docs_with_multiple_queries/1,
+                    fun should_succeed_on_view_with_queries_keys/1,
+                    fun should_succeed_on_view_with_queries_limit_skip/1,
+                    fun should_succeed_on_view_with_multiple_queries/1
                 ]
             }
         }
@@ -264,4 +276,185 @@ should_return_400_for_bad_engine(_) ->
         Url = BaseUrl ++ "?engine=cowabunga",
         {ok, Status, _, _} = test_request:put(Url, [?CONTENT_JSON, ?AUTH], "{}"),
         ?assertEqual(400, Status)
+    end).
+
+
+should_succeed_on_all_docs_with_queries_keys(Url) ->
+    ?_test(begin
+        [create_doc(Url, "testdoc" ++ ?i2l(I)) || I <- lists:seq(1, 10)],
+        QueryDoc = "{\"queries\": [{\"keys\": [ \"testdoc3\", \"testdoc8\"]}]}",
+        {ok, RC, _, RespBody} = test_request:post(Url ++ "/_all_docs/queries/",
+            [?CONTENT_JSON, ?AUTH], QueryDoc),
+        ?assertEqual(200, RC),
+        {ResultJson} = ?JSON_DECODE(RespBody),
+        ResultJsonBody = couch_util:get_value(<<"results">>, ResultJson),
+        {InnerJson} = lists:nth(1, ResultJsonBody),
+        ?assertEqual(2, length(couch_util:get_value(<<"rows">>, InnerJson)))
+    end).
+
+
+should_succeed_on_all_docs_with_queries_limit_skip(Url) ->
+    ?_test(begin
+        [create_doc(Url, "testdoc" ++ ?i2l(I)) || I <- lists:seq(1, 10)],
+        QueryDoc = "{\"queries\": [{\"limit\": 5, \"skip\": 2}]}",
+        {ok, RC, _, RespBody} = test_request:post(Url ++ "/_all_docs/queries/",
+            [?CONTENT_JSON, ?AUTH], QueryDoc),
+        ?assertEqual(200, RC),
+        {ResultJson} = ?JSON_DECODE(RespBody),
+        ResultJsonBody = couch_util:get_value(<<"results">>, ResultJson),
+        {InnerJson} = lists:nth(1, ResultJsonBody),
+        ?assertEqual(2, couch_util:get_value(<<"offset">>, InnerJson)),
+        ?assertEqual(5, length(couch_util:get_value(<<"rows">>, InnerJson)))
+    end).
+
+
+should_succeed_on_all_docs_with_multiple_queries(Url) ->
+    ?_test(begin
+        [create_doc(Url, "testdoc" ++ ?i2l(I)) || I <- lists:seq(1, 10)],
+        QueryDoc = "{\"queries\": [{\"keys\": [ \"testdoc3\", \"testdoc8\"]},
+            {\"limit\": 5, \"skip\": 2}]}",
+        {ok, RC, _, RespBody} = test_request:post(Url ++ "/_all_docs/queries/",
+            [?CONTENT_JSON, ?AUTH], QueryDoc),
+        ?assertEqual(200, RC),
+        {ResultJson} = ?JSON_DECODE(RespBody),
+        ResultJsonBody = couch_util:get_value(<<"results">>, ResultJson),
+        {InnerJson1} = lists:nth(1, ResultJsonBody),
+        ?assertEqual(2, length(couch_util:get_value(<<"rows">>, InnerJson1))),
+        {InnerJson2} = lists:nth(2, ResultJsonBody),
+        ?assertEqual(2, couch_util:get_value(<<"offset">>, InnerJson2)),
+        ?assertEqual(5, length(couch_util:get_value(<<"rows">>, InnerJson2)))
+    end).
+
+
+should_succeed_on_design_docs_with_queries_keys(Url) ->
+    ?_test(begin
+        [create_doc(Url, "_design/ddoc" ++ ?i2l(I)) || I <- lists:seq(1, 10)],
+        QueryDoc = "{\"queries\": [{\"keys\": [ \"_design/ddoc3\",
+            \"_design/ddoc8\"]}]}",
+        {ok, RC, _, RespBody} = test_request:post(Url ++
+            "/_design_docs/queries/", [?CONTENT_JSON, ?AUTH], QueryDoc),
+        ?assertEqual(200, RC),
+        {ResultJson} = ?JSON_DECODE(RespBody),
+        ResultJsonBody = couch_util:get_value(<<"results">>, ResultJson),
+        {InnerJson} = lists:nth(1, ResultJsonBody),
+        ?assertEqual(2, length(couch_util:get_value(<<"rows">>, InnerJson)))
+    end).
+
+
+should_succeed_on_design_docs_with_queries_limit_skip(Url) ->
+    ?_test(begin
+        [create_doc(Url, "_design/ddoc" ++ ?i2l(I)) || I <- lists:seq(1, 10)],
+        QueryDoc = "{\"queries\": [{\"limit\": 5, \"skip\": 2}]}",
+        {ok, RC, _, RespBody} = test_request:post(Url ++
+            "/_design_docs/queries/", [?CONTENT_JSON, ?AUTH], QueryDoc),
+        ?assertEqual(200, RC),
+        {ResultJson} = ?JSON_DECODE(RespBody),
+        ResultJsonBody = couch_util:get_value(<<"results">>, ResultJson),
+        {InnerJson} = lists:nth(1, ResultJsonBody),
+        ?assertEqual(2, couch_util:get_value(<<"offset">>, InnerJson)),
+        ?assertEqual(5, length(couch_util:get_value(<<"rows">>, InnerJson)))
+    end).
+
+
+should_succeed_on_design_docs_with_multiple_queries(Url) ->
+    ?_test(begin
+        [create_doc(Url, "_design/ddoc" ++ ?i2l(I)) || I <- lists:seq(1, 10)],
+        QueryDoc = "{\"queries\": [{\"keys\": [ \"_design/ddoc3\",
+            \"_design/ddoc8\"]}, {\"limit\": 5, \"skip\": 2}]}",
+        {ok, RC, _, RespBody} = test_request:post(Url ++
+            "/_design_docs/queries/", [?CONTENT_JSON, ?AUTH], QueryDoc),
+        ?assertEqual(200, RC),
+        {ResultJson} = ?JSON_DECODE(RespBody),
+        ResultJsonBody = couch_util:get_value(<<"results">>, ResultJson),
+        {InnerJson1} = lists:nth(1, ResultJsonBody),
+        ?assertEqual(2, length(couch_util:get_value(<<"rows">>, InnerJson1))),
+        {InnerJson2} = lists:nth(2, ResultJsonBody),
+        ?assertEqual(2, couch_util:get_value(<<"offset">>, InnerJson2)),
+        ?assertEqual(5, length(couch_util:get_value(<<"rows">>, InnerJson2)))
+    end).
+
+
+should_succeed_on_local_docs_with_queries_keys(Url) ->
+    ?_test(begin
+        [create_doc(Url, "_local/doc" ++ ?i2l(I)) || I <- lists:seq(1, 10)],
+        QueryDoc = "{\"queries\": [{\"keys\":
+            [ \"_local/doc3\", \"_local/doc8\"]}]}",
+        {ok, RC, _, RespBody} = test_request:post(Url ++ "/_local_docs/queries/",
+            [?CONTENT_JSON, ?AUTH], QueryDoc),
+        ?assertEqual(200, RC),
+        {ResultJson} = ?JSON_DECODE(RespBody),
+        ResultJsonBody = couch_util:get_value(<<"results">>, ResultJson),
+        {InnerJson} = lists:nth(1, ResultJsonBody),
+        ?assertEqual(2, length(couch_util:get_value(<<"rows">>, InnerJson)))
+    end).
+
+
+should_succeed_on_local_docs_with_multiple_queries(Url) ->
+    ?_test(begin
+        [create_doc(Url, "_local/doc" ++ ?i2l(I)) || I <- lists:seq(1, 10)],
+        QueryDoc = "{\"queries\":[
+                        {\"keys\": [\"_local/doc3\"]},
+                        {\"keys\": [ \"_local/doc6\", \"_local/ddoc9\"]}]}",
+        {ok, RC, _, RespBody} = test_request:post(Url ++
+        "/_local_docs/queries/", [?CONTENT_JSON, ?AUTH], QueryDoc),
+        ?assertEqual(200, RC),
+        {ResultJson} = ?JSON_DECODE(RespBody),
+        ResultJsonBody = couch_util:get_value(<<"results">>, ResultJson),
+        {InnerJson1} = lists:nth(1, ResultJsonBody),
+        ?assertEqual(1, length(couch_util:get_value(<<"rows">>, InnerJson1))),
+        {InnerJson2} = lists:nth(2, ResultJsonBody),
+        ?assertEqual(2, length(couch_util:get_value(<<"rows">>, InnerJson2)))
+    end).
+
+
+should_succeed_on_view_with_queries_keys(Url) ->
+    ?_test(begin
+        [create_doc(Url, "testdoc" ++ ?i2l(I)) || I <- lists:seq(1, 10)],
+        {ok, _, _, _} = test_request:put(Url ++ "/_design/bar",
+            [?CONTENT_JSON, ?AUTH], ?DDOC),
+        QueryDoc = "{\"queries\": [{\"keys\": [ \"testdoc3\",
+            \"testdoc8\"]}]}",
+        {ok, _, _, RespBody} = test_request:post(Url ++ "/_design/bar/"
+            ++ "_view/baz/queries/", [?CONTENT_JSON, ?AUTH], QueryDoc),
+        {ResultJson} = ?JSON_DECODE(RespBody),
+        ResultJsonBody = couch_util:get_value(<<"results">>, ResultJson),
+        {InnerJson} = lists:nth(1, ResultJsonBody),
+        ?assertEqual(2, length(couch_util:get_value(<<"rows">>, InnerJson)))
+    end).
+
+
+should_succeed_on_view_with_queries_limit_skip(Url) ->
+    ?_test(begin
+        [create_doc(Url, "testdoc" ++ ?i2l(I)) || I <- lists:seq(1, 10)],
+        {ok, _, _, _} = test_request:put(Url ++ "/_design/bar",
+            [?CONTENT_JSON, ?AUTH], ?DDOC),
+        QueryDoc = "{\"queries\": [{\"limit\": 5, \"skip\": 2}]}",
+        {ok, RC, _, RespBody} = test_request:post(Url ++ "/_design/bar/"
+            ++ "_view/baz/queries/", [?CONTENT_JSON, ?AUTH], QueryDoc),
+        ?assertEqual(200, RC),
+        {ResultJson} = ?JSON_DECODE(RespBody),
+        ResultJsonBody = couch_util:get_value(<<"results">>, ResultJson),
+        {InnerJson} = lists:nth(1, ResultJsonBody),
+        ?assertEqual(2, couch_util:get_value(<<"offset">>, InnerJson)),
+        ?assertEqual(5, length(couch_util:get_value(<<"rows">>, InnerJson)))
+    end).
+
+
+should_succeed_on_view_with_multiple_queries(Url) ->
+    ?_test(begin
+        [create_doc(Url, "testdoc" ++ ?i2l(I)) || I <- lists:seq(1, 10)],
+        {ok, _, _, _} = test_request:put(Url ++ "/_design/bar",
+            [?CONTENT_JSON, ?AUTH], ?DDOC),
+        QueryDoc = "{\"queries\": [{\"keys\": [ \"testdoc3\",
+            \"testdoc8\"]}, {\"limit\": 5, \"skip\": 2}]}",
+        {ok, RC, _, RespBody} = test_request:post(Url ++ "/_design/bar/"
+            ++ "_view/baz/queries/", [?CONTENT_JSON, ?AUTH], QueryDoc),
+        ?assertEqual(200, RC),
+        {ResultJson} = ?JSON_DECODE(RespBody),
+        ResultJsonBody = couch_util:get_value(<<"results">>, ResultJson),
+        {InnerJson1} = lists:nth(1, ResultJsonBody),
+        ?assertEqual(2, length(couch_util:get_value(<<"rows">>, InnerJson1))),
+        {InnerJson2} = lists:nth(2, ResultJsonBody),
+        ?assertEqual(2, couch_util:get_value(<<"offset">>, InnerJson2)),
+        ?assertEqual(5, length(couch_util:get_value(<<"rows">>, InnerJson2)))
     end).
