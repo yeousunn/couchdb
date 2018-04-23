@@ -54,6 +54,13 @@ start(#st{} = St, DbName, Options, Parent) ->
     % and hope everything works out for the best.
     unlink(DFd),
 
+    %%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    case couch_db:open_int(DbName, [?ADMIN_CTX]) of
+        {ok, Db} -> couch_db:close(Db);
+        Else -> throw(Else)
+    end,
+    %%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
     NewSt1 = copy_purge_info(St, NewSt),
     NewSt2 = copy_compact(DbName, St, NewSt1, Retry),
     NewSt3 = sort_meta_data(NewSt2),
