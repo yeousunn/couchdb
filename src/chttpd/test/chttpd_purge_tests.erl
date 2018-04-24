@@ -66,6 +66,7 @@ purge_test_() ->
                 [
                     fun test_empty_purge_request/1,
                     fun test_ok_purge_request/1,
+                    fun test_exceed_limits_on_purge_infos/1,
                     fun should_error_set_purged_docs_limit_to0/1
                 ]
             }
@@ -127,9 +128,52 @@ test_ok_purge_request(Url) ->
     end).
 
 
+test_exceed_limits_on_purge_infos(Url) ->
+    ?_test(begin
+        {ok, Status1, _, _} = test_request:put(Url ++ "/_purged_infos_limit/",
+            [?CONTENT_JSON, ?AUTH], "2"),
+        ?assert(Status1 =:= 200),
+
+        {ok, _, _, Body} = create_doc(Url, "doc1"),
+        {Json} = ?JSON_DECODE(Body),
+        Rev1 = couch_util:get_value(<<"rev">>, Json, undefined),
+        {ok, _, _, Body2} = create_doc(Url, "doc2"),
+        {Json2} = ?JSON_DECODE(Body2),
+        Rev2 = couch_util:get_value(<<"rev">>, Json2, undefined),
+        {ok, _, _, Body3} = create_doc(Url, "doc3"),
+        {Json3} = ?JSON_DECODE(Body3),
+        Rev3 = couch_util:get_value(<<"rev">>, Json3, undefined),
+
+        IdsRevsEJson = {[
+            {<<"doc1">>, [Rev1]},
+            {<<"doc2">>, [Rev2]},
+            {<<"doc3">>, [Rev3]}
+        ]},
+        IdsRevs = binary_to_list(?JSON_ENCODE(IdsRevsEJson)),
+
+        {ok, Status2, _, ResultBody} = test_request:post(Url ++ "/_purge/",
+            [?CONTENT_JSON, ?AUTH], IdsRevs),
+
+        ResultJson = ?JSON_DECODE(ResultBody),
+        ?assert(Status2 =:= 201 orelse Status2 =:= 202),
+        ?assertEqual(
+            {[
+                {<<"purge_seq">>, null},
+                {<<"purged">>, {[
+                    {<<"doc1">>, [Rev1]},
+                    {<<"doc2">>, [Rev2]},
+                    {<<"doc3">>, [Rev3]}
+                ]}}
+            ]},
+            ResultJson
+        )
+
+    end).
+
+
 should_error_set_purged_docs_limit_to0(Url) ->
     ?_test(begin
-        {ok, Status, _, _} = test_request:put(Url ++ "/_purged_docs_limit/",
+        {ok, Status, _, _} = test_request:put(Url ++ "/_purged_infos_limit/",
             [?CONTENT_JSON, ?AUTH], "0"),
         ?assert(Status =:= 400)
     end).
