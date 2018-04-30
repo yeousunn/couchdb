@@ -11,7 +11,6 @@
 // the License.
 
 couchTests.purge = function(debug) {
-  return console.log('TODO: this feature will be re-opened soon');
   var db_name = get_random_db_name();
   var db = new CouchDB(db_name, {"X-Couch-Full-Commit":"false"});
   db.createDb();
@@ -58,8 +57,8 @@ couchTests.purge = function(debug) {
   var result = JSON.parse(xhr.responseText);
   var newInfo = db.info();
 
-  T(result.purged["1"].purged[0] == doc1._rev);
-  T(result.purged["2"].purged[0] == doc2._rev);
+  T(result.purged["1"] == doc1._rev);
+  T(result.purged["2"] == doc2._rev);
 
   T(db.open("1") == null);
   T(db.open("2") == null);
