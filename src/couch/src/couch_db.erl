@@ -171,8 +171,11 @@ reopen(#db{} = Db) ->
     % We could have just swapped out the storage engine
     % for this database during a compaction so we just
     % reimplement this as a close/open pair now.
-    close(Db),
-    open(Db#db.name, [{user_ctx, Db#db.user_ctx} | Db#db.options]).
+    try
+        open(Db#db.name, [{user_ctx, Db#db.user_ctx} | Db#db.options])
+    after
+        close(Db)
+    end.
 
 
 % You shouldn't call this. Its part of the ref counting between
@@ -386,9 +389,22 @@ purge_docs(Db, IdRevs) ->
     Rev :: {non_neg_integer(), binary()},
     PurgeOption :: interactive_edit | replicated_changes,
     Reply :: {ok, []} | {ok, [Rev]}.
-purge_docs(#db{main_pid = Pid} = Db, UUIdsIdsRevs, Options) ->
+purge_docs(#db{main_pid = Pid} = Db, UUIDsIdsRevs, Options) ->
+    % Check here if any UUIDs already exist when
+    % we're not replicating purge infos
+    IsRepl = lists:member(replicated_changes, Options),
+    if IsRepl -> ok; true ->
+        UUIDs = [UUID || {UUID, _, _} <- UUIDsIdsRevs],
+        lists:foreach(fun(Resp) ->
+            if Resp == not_found -> ok; true ->
+                Fmt = "Duplicate purge info UIUD: ~s",
+                Reason = io_lib:format(Fmt, [element(2, Resp)]),
+                throw({badreq, Reason})
+            end
+        end, get_purge_infos(Db, UUIDs))
+    end,
     increment_stat(Db, [couchdb, database_purges]),
-    gen_server:call(Pid, {purge_docs, UUIdsIdsRevs, Options}).
+    gen_server:call(Pid, {purge_docs, UUIDsIdsRevs, Options}).
 
 -spec get_purge_infos(#db{}, [UUId]) -> [PurgeInfo] when
     UUId :: binary(),

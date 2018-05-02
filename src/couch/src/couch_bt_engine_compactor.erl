@@ -104,10 +104,9 @@ open_compaction_files(SrcHdr, DbFilePath, Options) ->
 
 
 copy_purge_info(DbName, OldSt, NewSt, Retry) ->
-    %MinPurgeSeq = couch_util:with_db(DbName, fun(Db) ->
-    %    couch_db:get_minimum_purge_seq(Db)
-    %end),
-    MinPurgeSeq = 0,
+    MinPurgeSeq = couch_util:with_db(DbName, fun(Db) ->
+        couch_db:get_minimum_purge_seq(Db)
+    end),
     OldPSTree = OldSt#st.purge_seq_tree,
     StartSeq = couch_bt_engine:get_purge_seq(NewSt) + 1,
     BufferSize = config:get_integer(
@@ -140,28 +139,32 @@ copy_purge_info(DbName, OldSt, NewSt, Retry) ->
     copy_purge_infos(OldSt, NewStAcc, Infos, MinPurgeSeq, Retry).
 
 
-copy_purge_infos(OldSt, NewSt, Infos, MinPurgeSeq, Retry) ->
+copy_purge_infos(OldSt, NewSt0, Infos, MinPurgeSeq, Retry) ->
     #st{
         id_tree = OldIdTree
     } = OldSt,
+
+    % Re-bind our id_tree to the backing btree
+    NewIdTreeState = couch_bt_engine_header:id_tree_state(NewSt0#st.header),
+    MetaFd = couch_emsort:get_fd(NewSt0#st.id_tree),
+    MetaState = couch_emsort:get_state(NewSt0#st.id_tree),
+    NewSt1 = bind_id_tree(NewSt0, NewSt0#st.fd, NewIdTreeState),
+
     #st{
         id_tree = NewIdTree0,
         seq_tree = NewSeqTree0,
         purge_tree = NewPurgeTree0,
         purge_seq_tree = NewPurgeSeqTree0
-    } = copy_meta_data(NewSt),
+    } = NewSt1,
 
     % Copy over the purge infos
-    InfosToAdd = lists:takewhile(fun({PSeq, _, _, _}) ->
+    InfosToAdd = lists:filter(fun({PSeq, _, _, _}) ->
         PSeq > MinPurgeSeq
     end, Infos),
     {ok, NewPurgeTree1} = couch_btree:add(NewPurgeTree0, InfosToAdd),
     {ok, NewPurgeSeqTree1} = couch_btree:add(NewPurgeSeqTree0, InfosToAdd),
-    NewIdTreeState = couch_bt_engine_header:id_tree_state(NewSt#st.header),
-    MetaFd = couch_emsort:get_fd(NewSt#st.id_tree),
-    MetaState = couch_emsort:get_state(NewSt#st.id_tree),
-    NewSt0 = bind_id_tree(NewSt, NewSt#st.fd, NewIdTreeState),
-    NewSt1 = NewSt0#st{
+
+    NewSt2 = NewSt1#st{
         purge_tree = NewPurgeTree1,
         purge_seq_tree = NewPurgeSeqTree1
     },
@@ -170,7 +173,7 @@ copy_purge_infos(OldSt, NewSt, Infos, MinPurgeSeq, Retry) ->
     % any of the referenced docs have been completely purged
     % from the database. Any doc that has been completely purged
     % must then be removed from our partially compacted database.
-    NewSt2 = if Retry == nil -> NewSt1; true ->
+    NewSt3 = if Retry == nil -> NewSt2; true ->
         AllDocIds = [DocId || {_PurgeSeq, _UUID, DocId, _Revs} <- Infos],
         UniqDocIds = lists:usort(AllDocIds),
         OldIdResults = couch_btree:lookup(OldIdTree, UniqDocIds),
@@ -194,17 +197,17 @@ copy_purge_infos(OldSt, NewSt, Infos, MinPurgeSeq, Retry) ->
         {ok, NewIdTree1} = couch_btree:add_remove(NewIdTree0, [], RemIds),
         {ok, NewSeqTree1} = couch_btree:add_remove(NewSeqTree0, [], RemSeqs),
 
-        NewSt1#st{
+        NewSt2#st{
             id_tree = NewIdTree1,
             seq_tree = NewSeqTree1
         }
     end,
 
-    Header = couch_bt_engine:update_header(NewSt2, NewSt2#st.header),
-    NewSt3 = NewSt2#st{
+    Header = couch_bt_engine:update_header(NewSt3, NewSt3#st.header),
+    NewSt4 = NewSt3#st{
         header = Header
     },
-    bind_emsort(NewSt3, MetaFd, MetaState).
+    bind_emsort(NewSt4, MetaFd, MetaState).
 
 
 copy_compact(DbName, St, NewSt0, Retry) ->

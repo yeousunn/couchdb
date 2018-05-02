@@ -97,7 +97,10 @@ handle_call({set_revs_limit, Limit}, _From, Db) ->
 handle_call({set_purge_infos_limit, Limit}, _From, Db) ->
     {ok, Db2} = couch_db_engine:set_purge_infos_limit(Db, Limit),
     ok = gen_server:call(couch_server, {db_updated, Db2}, infinity),
-    {reply, ok, Db2};
+    {reply, ok, Db2, idle_limit()};
+
+handle_call({purge_docs, [], _}, _From, Db) ->
+    {reply, {ok, []}, Db, idle_limit()};
 
 handle_call({purge_docs, PurgeReqs0, Options}, _From, Db) ->
     % Filter out any previously applied updates during
@@ -105,29 +108,47 @@ handle_call({purge_docs, PurgeReqs0, Options}, _From, Db) ->
     IsRepl = lists:member(replicated_changes, Options),
     PurgeReqs = if not IsRepl -> PurgeReqs0; true ->
         UUIDs = [UUID || {UUID, _Id, _Revs} <- PurgeReqs0],
-        {ok, PurgeInfos} = couch_db:load_purge_infos(Db, UUIDs),
+        PurgeInfos = couch_db_engine:load_purge_infos(Db, UUIDs),
         lists:flatmap(fun
             ({not_found, PReq}) -> [PReq];
             ({{_, _, _, _}, _}) -> []
         end, lists:zip(PurgeInfos, PurgeReqs0))
     end,
 
-    Ids = [Id || {_UUID, Id, _Revs} <- PurgeReqs],
-    DocInfos = couch_db_engine:open_docs(Db, Ids),
-    UpdateSeq = couch_db_engine:get_update_seq(Db),
-    PurgeSeq = couch_db_engine:get_purge_seq(Db),
+    Ids = lists:usort(lists:map(fun({_UUID, Id, _Revs}) -> Id end, PurgeReqs)),
+    FDIs = couch_db_engine:open_docs(Db, Ids),
+    USeq = couch_db_engine:get_update_seq(Db),
 
-    InitAcc = {[], [], []},
-    {Pairs, PInfos, Replies} = purge_docs(
-            PurgeReqs, DocInfos, UpdateSeq, PurgeSeq, InitAcc),
+    IdFDIs = lists:zip(Ids, FDIs),
+    {NewIdFDIs, Replies} = purge_docs(PurgeReqs, IdFDIs, USeq, []),
 
-    Db2 = if Pairs == [] -> Db; true ->
-        {ok, Db1} = couch_db_engine:purge_docs(Db, Pairs, PInfos),
-        ok = gen_server:call(couch_server, {db_updated, Db1}, infinity),
-        couch_event:notify(Db1#db.name, updated),
-        Db1
-    end,
-    {reply, {ok, Replies}, Db2};
+    Pairs = lists:flatmap(fun({DocId, OldFDI}) ->
+        {DocId, NewFDI} = lists:keyfind(DocId, 1, NewIdFDIs),
+        %io:format(standard_error, "~nPAIR: ~p~n", [{OldFDI, NewFDI}]),
+        case {OldFDI, NewFDI} of
+            {not_found, not_found} ->
+                [];
+            {#full_doc_info{} = A, #full_doc_info{} = A} ->
+                [];
+            {#full_doc_info{}, _} ->
+                [{OldFDI, NewFDI}]
+        end
+    end, IdFDIs),
+
+    PSeq = couch_db_engine:get_purge_seq(Db),
+    {RevPInfos, _} = lists:foldl(fun({UUID, DocId, Revs}, {PIAcc, PSeqAcc}) ->
+        Info = {PSeqAcc + 1, UUID, DocId, Revs},
+        {[Info | PIAcc], PSeqAcc + 1}
+    end, {[], PSeq}, PurgeReqs),
+    PInfos = lists:reverse(RevPInfos),
+
+    %io:format(standard_error, "~n~nPAIRS: ~p~n~n", [Pairs]),
+
+    {ok, Db1} = couch_db_engine:purge_docs(Db, Pairs, PInfos),
+    Db2 = commit_data(Db1),
+    ok = gen_server:call(couch_server, {db_updated, Db2}, infinity),
+    couch_event:notify(Db2#db.name, updated),
+    {reply, {ok, Replies}, Db2, idle_limit()};
 
 handle_call(Msg, From, Db) ->
     case couch_db_engine:handle_db_updater_call(Msg, From, Db) of
@@ -653,20 +674,21 @@ update_local_doc_revs(Docs) ->
     end, Docs).
 
 
-purge_docs([], [], _USeq, _PSeq, {Pairs, PInfos, Replies}) ->
-    {lists:reverse(Pairs), lists:reverse(PInfos), lists:reverse(Replies)};
+purge_docs([], IdFDIs, _USeq, Replies) ->
+    {IdFDIs, lists:reverse(Replies)};
 
-purge_docs([Req | RestReqs], [FDI | RestInfos], USeq, PSeq, Acc) ->
-    {UUID, DocId, Revs} = Req,
-    {Pair, RemovedRevs, NewUSeq} = case FDI of
+purge_docs([Req | RestReqs], IdFDIs, USeq, Replies) ->
+    {_UUID, DocId, Revs} = Req,
+    {value, {_, FDI0}, RestIdFDIs} = lists:keytake(DocId, 1, IdFDIs),
+    {NewFDI, RemovedRevs, NewUSeq} = case FDI0 of
         #full_doc_info{rev_tree = Tree} ->
             case couch_key_tree:remove_leafs(Tree, Revs) of
                 {_, []} ->
                     % No change
-                    {no_change, [], USeq};
+                    {FDI0, [], USeq};
                 {[], Removed} ->
                     % Completely purged
-                    {{FDI, not_found}, Removed, USeq};
+                    {not_found, Removed, USeq};
                 {NewTree, Removed} ->
                     % Its possible to purge the #leaf{} that contains
                     % the update_seq where this doc sits in the
@@ -681,27 +703,18 @@ purge_docs([Req | RestReqs], [FDI | RestInfos], USeq, PSeq, Acc) ->
                             {Value, SeqAcc}
                     end, USeq, NewTree),
 
-                    NewFDI = FDI#full_doc_info{
+                    FDI1 = FDI0#full_doc_info{
                         update_seq = NewUpdateSeq,
                         rev_tree = NewTree2
                     },
-                    {{FDI, NewFDI}, Removed, NewUpdateSeq}
+                    {FDI1, Removed, NewUpdateSeq}
             end;
         not_found ->
             % Not found means nothing to change
-            {no_change, [], USeq}
+            {not_found, [], USeq}
     end,
-    {Pairs, PInfos, Replies} = Acc,
-    NewPairs = case Pair of
-        no_change -> Pairs;
-        _ -> [Pair | Pairs]
-    end,
-    NewAcc = {
-        NewPairs,
-        [{PSeq + 1, UUID, DocId, Revs} | PInfos],
-        [{ok, RemovedRevs} | Replies]
-    },
-    purge_docs(RestReqs, RestInfos, NewUSeq, PSeq + 1, NewAcc).
+    NewReplies = [{ok, RemovedRevs} | Replies],
+    purge_docs(RestReqs, [{DocId, NewFDI} | RestIdFDIs], NewUSeq, NewReplies).
 
 
 commit_data(Db) ->

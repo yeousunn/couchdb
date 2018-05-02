@@ -65,6 +65,9 @@ purge_test_() ->
                 fun teardown/1,
                 [
                     fun test_empty_purge_request/1,
+                    fun test_chttpd_status_code_201/1,
+                    %fun test_chttpd_status_code_202/1,
+                    %fun test_chttpd_status_code_500/1,
                     fun test_ok_purge_request/1,
                     fun test_exceed_limits_on_purge_infos/1,
                     fun should_error_set_purged_docs_limit_to0/1
@@ -88,6 +91,23 @@ test_empty_purge_request(Url) ->
                 ]},
                 ResultJson
             )
+    end).
+
+
+test_chttpd_status_code_201(Url) ->
+    ?_test(begin
+        IdsRevs = "{}",
+        {ok, Status, _, ResultBody} = test_request:post(Url ++ "/_purge/",
+            [?CONTENT_JSON, ?AUTH], IdsRevs),
+        ResultJson = ?JSON_DECODE(ResultBody),
+        ?assert(Status =:= 201 orelse Status =:= 202),
+        ?assertEqual(
+            {[
+                {<<"purge_seq">>, null},
+                {<<"purged">>,{[]}}
+            ]},
+            ResultJson
+        )
     end).
 
 
