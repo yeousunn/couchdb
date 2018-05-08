@@ -815,7 +815,12 @@ init_state(FilePath, Fd, Header0, Options) ->
         ]),
 
     PurgeTreeState = couch_bt_engine_header:purge_tree_state(Header),
-    {ok, PurgeTree} = couch_btree:open(PurgeTreeState, Fd, [
+    PurgeTreeState2 = case PurgeTreeState of
+        0 -> nil;
+        _ -> PurgeTreeState
+    end,
+
+    {ok, PurgeTree} = couch_btree:open(PurgeTreeState2, Fd, [
         {split, fun ?MODULE:purge_tree_split/1},
         {join, fun ?MODULE:purge_tree_join/2},
         {reduce, fun ?MODULE:purge_tree_reduce/2}
@@ -914,7 +919,7 @@ upgrade_purge_info(Fd, Header) ->
                     {reduce, fun ?MODULE:purge_tree_reduce/2}
                 ]),
                 {ok, PurgeTree2} = couch_btree:add(PurgeTree, Infos),
-                {ok, PurgeTreeSt} = couch_btree:get_state(PurgeTree2),
+                PurgeTreeSt = couch_btree:get_state(PurgeTree2),
 
                 {ok, PurgeSeqTree} = couch_btree:open(nil, Fd, [
                     {split, fun ?MODULE:purge_seq_tree_split/1},
@@ -922,7 +927,7 @@ upgrade_purge_info(Fd, Header) ->
                     {reduce, fun ?MODULE:purge_tree_reduce/2}
                 ]),
                 {ok, PurgeSeqTree2} = couch_btree:add(PurgeSeqTree, Infos),
-                {ok, PurgeSeqTreeSt} = couch_btree:get_state(PurgeSeqTree2),
+                PurgeSeqTreeSt = couch_btree:get_state(PurgeSeqTree2),
 
                 couch_bt_engine_header:set(Header, [
                     {purge_tree_state, PurgeTreeSt},
