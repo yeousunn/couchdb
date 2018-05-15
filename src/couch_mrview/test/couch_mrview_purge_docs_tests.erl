@@ -39,9 +39,12 @@ view_purge_test_() ->
                 fun setup/0, fun teardown/1,
                 [
                     fun test_purge_single/1,
-                    fun test_purge_multiple/1,
-                    fun test_purge_with_compact1/1,
-                    fun test_purge_with_compact2/1
+                    fun test_purge_partial/1,
+                    fun test_purge_complete/1,
+                    fun test_purge_nochange/1,
+                    fun test_purge_compact_size_check/1,
+                    fun test_purge_compact_for_stale_purge_cp_without_client/1,
+                    fun test_purge_compact_for_stale_purge_cp_with_client/1
                 ]
             }
         }
@@ -83,7 +86,47 @@ test_purge_single(Db) ->
     end).
 
 
-test_purge_multiple(Db) ->
+test_purge_partial(Db) ->
+    ?_test(begin
+        Result = run_query(Db, []),
+        Expect = {ok, [
+            {meta, [{total, 5}, {offset, 0}]},
+            {row, [{id, <<"1">>}, {key, 1}, {value, 1}]},
+            {row, [{id, <<"2">>}, {key, 2}, {value, 2}]},
+            {row, [{id, <<"3">>}, {key, 3}, {value, 3}]},
+            {row, [{id, <<"4">>}, {key, 4}, {value, 4}]},
+            {row, [{id, <<"5">>}, {key, 5}, {value, 5}]}
+        ]},
+        ?assertEqual(Expect, Result),
+
+        FDI1 = couch_db:get_full_doc_info(Db, <<"1">>), Rev1 = get_rev(FDI1),
+        Update = {[
+            {'_id', <<"1">>},
+            {'_rev', couch_doc:rev_to_str({1, [crypto:hash(md5, <<"1.2">>)]})},
+            {'val', 1.2}
+        ]},
+        {ok, [_Rev2]} = save_docs(Db, [Update], [replicated_changes]),
+
+        PurgeInfos = [{<<"UUID1">>, <<"1">>, [Rev1]}],
+
+        {ok, _} = couch_db:purge_docs(Db, PurgeInfos),
+        {ok, Db2} = couch_db:reopen(Db),
+
+        Result2 = run_query(Db2, []),
+        Expect2 = {ok, [
+            {meta, [{total, 5}, {offset, 0}]},
+            {row, [{id, <<"1">>}, {key, 1.2}, {value, 1.2}]},
+            {row, [{id, <<"2">>}, {key, 2}, {value, 2}]},
+            {row, [{id, <<"3">>}, {key, 3}, {value, 3}]},
+            {row, [{id, <<"4">>}, {key, 4}, {value, 4}]},
+            {row, [{id, <<"5">>}, {key, 5}, {value, 5}]}
+        ]},
+        ?assertEqual(Expect2, Result2),
+
+        ok
+    end).
+
+test_purge_complete(Db) ->
     ?_test(begin
         Result = run_query(Db, []),
         Expect = {ok, [
@@ -100,12 +143,12 @@ test_purge_multiple(Db) ->
         FDI2 = couch_db:get_full_doc_info(Db, <<"2">>), Rev2 = get_rev(FDI2),
         FDI5 = couch_db:get_full_doc_info(Db, <<"5">>), Rev5 = get_rev(FDI5),
 
-        IdsRevs = [
+        PurgeInfos = [
             {<<"UUID1">>, <<"1">>, [Rev1]},
             {<<"UUID2">>, <<"2">>, [Rev2]},
             {<<"UUID5">>, <<"5">>, [Rev5]}
         ],
-        {ok, _} = couch_db:purge_docs(Db, IdsRevs),
+        {ok, _} = couch_db:purge_docs(Db, PurgeInfos),
         {ok, Db2} = couch_db:reopen(Db),
 
         Result2 = run_query(Db2, []),
@@ -120,7 +163,44 @@ test_purge_multiple(Db) ->
     end).
 
 
-test_purge_with_compact1(Db) ->
+test_purge_nochange(Db) ->
+    ?_test(begin
+        Result = run_query(Db, []),
+        Expect = {ok, [
+            {meta, [{total, 5}, {offset, 0}]},
+            {row, [{id, <<"1">>}, {key, 1}, {value, 1}]},
+            {row, [{id, <<"2">>}, {key, 2}, {value, 2}]},
+            {row, [{id, <<"3">>}, {key, 3}, {value, 3}]},
+            {row, [{id, <<"4">>}, {key, 4}, {value, 4}]},
+            {row, [{id, <<"5">>}, {key, 5}, {value, 5}]}
+        ]},
+        ?assertEqual(Expect, Result),
+
+        FDI1 = couch_db:get_full_doc_info(Db, <<"1">>),
+        Rev1 = get_rev(FDI1),
+
+        PurgeInfos = [
+            {<<"UUID1">>, <<"6">>, [Rev1]}
+        ],
+        {ok, _} = couch_db:purge_docs(Db, PurgeInfos),
+        {ok, Db2} = couch_db:reopen(Db),
+
+        Result2 = run_query(Db2, []),
+        Expect2 = {ok, [
+            {meta, [{total, 5}, {offset, 0}]},
+            {row, [{id, <<"1">>}, {key, 1}, {value, 1}]},
+            {row, [{id, <<"2">>}, {key, 2}, {value, 2}]},
+            {row, [{id, <<"3">>}, {key, 3}, {value, 3}]},
+            {row, [{id, <<"4">>}, {key, 4}, {value, 4}]},
+            {row, [{id, <<"5">>}, {key, 5}, {value, 5}]}
+        ]},
+        ?assertEqual(Expect2, Result2),
+
+        ok
+    end).
+
+
+test_purge_compact_size_check(Db) ->
     ?_test(begin
         DbName = couch_db:name(Db),
         Docs = couch_mrview_test_util:make_docs(normal, 6, 200),
@@ -160,7 +240,63 @@ test_purge_with_compact1(Db) ->
         ok
     end).
 
-test_purge_with_compact2(Db) ->
+
+test_purge_compact_for_stale_purge_cp_without_client(Db) ->
+    ?_test(begin
+        DbName = couch_db:name(Db),
+        % add more documents to database for purge
+        Docs = couch_mrview_test_util:make_docs(normal, 6, 200),
+        {ok, Db1} = couch_mrview_test_util:save_docs(Db, Docs),
+
+        % change PurgedDocsLimit to 10 from 1000 to
+        % avoid timeout of eunit test
+        PurgedDocsLimit = 10,
+        couch_db:set_purge_infos_limit(Db1, PurgedDocsLimit),
+
+        % purge 150 documents
+        PurgedDocsNum = 150,
+        PurgeInfos = lists:foldl(fun(Id, CIdRevs) ->
+            Id1 = docid(Id),
+            FDI1 = couch_db:get_full_doc_info(Db1, Id1),
+            Rev1 = get_rev(FDI1),
+            UUID1 = uuid(Id),
+            [{UUID1, Id1, [Rev1]} | CIdRevs]
+        end, [], lists:seq(1, PurgedDocsNum)),
+        {ok, _} = couch_db:purge_docs(Db1, PurgeInfos),
+
+        {ok, Db2} = couch_db:reopen(Db1),
+        {ok, PurgedIdRevs} = couch_db:fold_purge_infos(
+            Db2,
+            0,
+            fun fold_fun/2,
+            [],
+            []
+        ),
+        ?assertEqual(PurgedDocsNum, length(PurgedIdRevs)),
+
+        % run compaction to trigger pruning of purge tree
+        {ok, Db3} = couch_db:open_int(DbName, []),
+        {ok, _CompactPid} = couch_db:start_compact(Db3),
+        wait_compaction(DbName, "database", ?LINE),
+        ok = couch_db:close(Db3),
+
+        % check the remaining purge requests in purge tree
+        {ok, Db4} = couch_db:reopen(Db3),
+        {ok, OldestPSeq} = couch_db:get_oldest_purge_seq(Db4),
+        {ok, PurgedIdRevs2} = couch_db:fold_purge_infos(
+            Db4,
+            OldestPSeq - 1,
+            fun fold_fun/2,
+            [],
+            []
+        ),
+        ?assertEqual(PurgedDocsLimit, length(PurgedIdRevs2)),
+
+        ok
+    end).
+
+
+test_purge_compact_for_stale_purge_cp_with_client(Db) ->
     ?_test(begin
         DbName = couch_db:name(Db),
         % add more documents to database for purge
@@ -221,6 +357,25 @@ test_purge_with_compact2(Db) ->
 
 run_query(Db, Opts) ->
     couch_mrview:query_view(Db, <<"_design/bar">>, <<"baz">>, Opts).
+
+
+save_docs(Db, JsonDocs, Options) ->
+    Docs = lists:map(fun(JDoc) ->
+        couch_doc:from_json_obj(?JSON_DECODE(?JSON_ENCODE(JDoc)))
+                     end, JsonDocs),
+    Opts = [full_commit | Options],
+    case lists:member(replicated_changes, Options) of
+        true ->
+            {ok, []} = couch_db:update_docs(
+                Db, Docs, Opts, replicated_changes),
+            {ok, lists:map(fun(Doc) ->
+                {Pos, [RevId | _]} = Doc#doc.revs,
+                {Pos, RevId}
+                           end, Docs)};
+        false ->
+            {ok, Resp} = couch_db:update_docs(Db, Docs, Opts),
+            {ok, [Rev || {ok, Rev} <- Resp]}
+    end.
 
 
 get_rev(#full_doc_info{} = FDI) ->

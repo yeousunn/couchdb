@@ -12,6 +12,12 @@
 
 -module(couch_db_purge_checkpoint_tests).
 
+-export([
+    valid_verify_fun/1,
+    verify_fun_with_throw/1,
+    verify_fun_without_bool_rc/1
+]).
+
 -include_lib("couch/include/couch_eunit.hrl").
 -include_lib("couch/include/couch_db.hrl").
 
