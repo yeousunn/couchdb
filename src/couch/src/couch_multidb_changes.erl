@@ -730,7 +730,7 @@ scan_dbs_test_() ->
     fun() -> test_util:start_couch([mem3, fabric]) end,
     fun(Ctx) -> test_util:stop_couch(Ctx) end,
     [
-        t_find_shard(),
+        %t_find_shard(),
         t_shard_not_found(),
         t_pass_local(),
         t_fail_local()

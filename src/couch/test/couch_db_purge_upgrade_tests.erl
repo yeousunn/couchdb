@@ -46,7 +46,7 @@ teardown(Files) ->
     lists:foreach(fun(File) -> file:delete(File) end, Files).
 
 
-purge_upgrade_test_() ->
+purge_upgrade_test() ->
     {
         "Purge Upgrade tests",
         {
