@@ -116,7 +116,6 @@ initialize_nodelist() ->
     #doc{id = SelfId} = Doc ->
         update_metadata(Db, Doc, NodeProps)
     end,
-    % TODO is this ignoring any update we just made above?
     Seq = couch_db:get_update_seq(Db),
     couch_db:close(Db),
     Seq.
@@ -184,7 +183,6 @@ update_metadata(Db, #doc{body = {DocProps}} = Doc, NewProps) ->
             % internal doc state matches .ini
             ok;
         MergedProps ->
-            ets:insert(?MODULE, {node(), MergedProps}),
             NewDoc = Doc#doc{body = {MergedProps}},
             {ok, _} = couch_db:update_doc(Db, NewDoc, [])
     end,
