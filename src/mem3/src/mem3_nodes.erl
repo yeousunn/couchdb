@@ -12,11 +12,14 @@
 
 -module(mem3_nodes).
 -behaviour(gen_server).
+-behaviour(config_listener).
 -vsn(1).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2,
     code_change/3]).
 
 -export([start_link/0, get_nodelist/0, get_node_info/2]).
+-export([handle_config_change/5, handle_config_terminate/3]).
+
 
 -include_lib("mem3/include/mem3.hrl").
 -include_lib("couch/include/couch_db.hrl").
@@ -43,6 +46,7 @@ get_node_info(Node, Key) ->
 init([]) ->
     ets:new(?MODULE, [named_table, {read_concurrency, true}]),
     UpdateSeq = initialize_nodelist(),
+    ok = config:listen_for_changes(?MODULE, nil),
     {Pid, _} = spawn_monitor(fun() -> listen_for_changes(UpdateSeq) end),
     {ok, #state{changes_pid = Pid, update_seq = UpdateSeq}}.
 
@@ -87,6 +91,15 @@ terminate(_Reason, _State) ->
 code_change(_OldVsn, #state{}=State, _Extra) ->
     {ok, State}.
 
+handle_config_change("node", Key, Value, _, State) ->
+    update_metadata([{?l2b(Key), ?l2b(Value)}]),
+    {ok, State};
+handle_config_change(_, _, _, _, State) ->
+    {ok, State}.
+
+handle_config_terminate(_Server, _Reason, _State) ->
+    ok.
+
 %% internal functions
 
 initialize_nodelist() ->
@@ -100,18 +113,8 @@ initialize_nodelist() ->
         ets:insert(?MODULE, {node(), NodeProps}),
         NewDoc = #doc{id = SelfId, body = {NodeProps}},
         {ok, _} = couch_db:update_doc(Db, NewDoc, []);
-    #doc{id = SelfId, body={DocProps}} = Doc ->
-        SortedNodeProps = lists:keysort(1, NodeProps),
-        SortedDocProps = lists:keysort(1, DocProps),
-        case lists:ukeymerge(1, SortedNodeProps, SortedDocProps) of
-            SortedDocProps ->
-                % typical case, internal doc state matches .ini
-                ok;
-            NewProps ->
-                ets:insert(?MODULE, {node(), NewProps}),
-                NewDoc = Doc#doc{body = {NewProps}},
-                {ok, _} = couch_db:update_doc(Db, NewDoc, [])
-        end
+    #doc{id = SelfId} = Doc ->
+        update_metadata(Db, Doc, NodeProps)
     end,
     % TODO is this ignoring any update we just made above?
     Seq = couch_db:get_update_seq(Db),
@@ -162,3 +165,27 @@ changes_callback({change, {Change}, _}, _) ->
     {ok, couch_util:get_value(<<"seq">>, Change)};
 changes_callback(timeout, _) ->
     {ok, nil}.
+
+update_metadata(NewProps) ->
+    DbName = config:get("mem3", "nodes_db", "_nodes"),
+    {ok, Db} = mem3_util:ensure_exists(DbName),
+    try
+        {ok, Doc} = couch_db:open_doc(Db, couch_util:to_binary(node()), [ejson_body]),
+        update_metadata(Db, Doc, NewProps)
+    after
+        couch_db:close(Db)
+    end.
+
+update_metadata(Db, #doc{body = {DocProps}} = Doc, NewProps) ->
+    SortedNewProps = lists:keysort(1, NewProps),
+    SortedDocProps = lists:keysort(1, DocProps),
+    case lists:ukeymerge(1, SortedNewProps, SortedDocProps) of
+        SortedDocProps ->
+            % internal doc state matches .ini
+            ok;
+        MergedProps ->
+            ets:insert(?MODULE, {node(), MergedProps}),
+            NewDoc = Doc#doc{body = {MergedProps}},
+            {ok, _} = couch_db:update_doc(Db, NewDoc, [])
+    end,
+    ok.
