@@ -92,16 +92,28 @@ code_change(_OldVsn, #state{}=State, _Extra) ->
 initialize_nodelist() ->
     DbName = config:get("mem3", "nodes_db", "_nodes"),
     {ok, Db} = mem3_util:ensure_exists(DbName),
-    {ok, _} = couch_db:fold_docs(Db, fun first_fold/2, Db, []),
-    % add self if not already present
-    case ets:lookup(?MODULE, node()) of
-    [_] ->
-        ok;
-    [] ->
-        ets:insert(?MODULE, {node(), []}),
-        Doc = #doc{id = couch_util:to_binary(node())},
-        {ok, _} = couch_db:update_doc(Db, Doc, [])
+    SelfId = couch_util:to_binary(node()),
+    NodeProps = [{?l2b(K), ?l2b(V)} || {K,V} <- config:get("node")],
+    {ok, {_, _, Doc}} = couch_db:fold_docs(Db, fun first_fold/2, {Db, SelfId, nil}, []),
+    case Doc of
+    nil ->
+        ets:insert(?MODULE, {node(), NodeProps}),
+        NewDoc = #doc{id = SelfId, body = {NodeProps}},
+        {ok, _} = couch_db:update_doc(Db, NewDoc, []);
+    #doc{id = SelfId, body={DocProps}} = Doc ->
+        SortedNodeProps = lists:keysort(1, NodeProps),
+        SortedDocProps = lists:keysort(1, DocProps),
+        case lists:ukeymerge(1, SortedNodeProps, SortedDocProps) of
+            SortedDocProps ->
+                % typical case, internal doc state matches .ini
+                ok;
+            NewProps ->
+                ets:insert(?MODULE, {node(), NewProps}),
+                NewDoc = Doc#doc{body = {NewProps}},
+                {ok, _} = couch_db:update_doc(Db, NewDoc, [])
+        end
     end,
+    % TODO is this ignoring any update we just made above?
     Seq = couch_db:get_update_seq(Db),
     couch_db:close(Db),
     Seq.
@@ -110,10 +122,15 @@ first_fold(#full_doc_info{id = <<"_design/", _/binary>>}, Acc) ->
     {ok, Acc};
 first_fold(#full_doc_info{deleted=true}, Acc) ->
     {ok, Acc};
-first_fold(#full_doc_info{id=Id}=DocInfo, Db) ->
-    {ok, #doc{body={Props}}} = couch_db:open_doc(Db, DocInfo, [ejson_body]),
+first_fold(#full_doc_info{id=Id}=DocInfo, {Db, SelfId, DocAcc}) ->
+    {ok, Doc} = couch_db:open_doc(Db, DocInfo, [ejson_body]),
+    #doc{body = {Props}} = Doc,
     ets:insert(?MODULE, {mem3_util:to_atom(Id), Props}),
-    {ok, Db}.
+    if Id =:= SelfId ->
+        {ok, {Db, SelfId, Doc}};
+    true ->
+        {ok, {Db, SelfId, DocAcc}}
+    end.
 
 listen_for_changes(Since) ->
     DbName = config:get("mem3", "nodes_db", "_nodes"),
