@@ -1,0 +1,11 @@
+{application, couch_chakra, [
+    {description, "CouchDB Chakra Interface"},
+    {vsn, git},
+    {applications, [
+        kernel,
+        stdlib,
+        crypto,
+        chakra
+    ]},
+    {registered, []}
+]}.
