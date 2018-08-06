@@ -269,9 +269,17 @@ create_ddoc_context(#st{runtime = Rt}, DDoc) ->
 
 
 load_script(Ctx, ScriptName) ->
-    {ok, Script} = get_priv_file(ScriptName),
-    BinScriptName = list_to_binary(ScriptName),
-    {ok, _} = chakra:eval(Ctx, Script, [{source_url, BinScriptName}]).
+    Code = case get(ScriptName) of
+        undefined ->
+            {ok, Script} = get_priv_file(ScriptName),
+            {ok, Serialized} = chakra:serialize(Ctx, Script),
+            put(ScriptName, Serialized),
+            Serialized;
+        Else ->
+            Else
+    end,
+    BinScriptName = iolist_to_binary(ScriptName),
+    {ok, _} = chakra:run(Ctx, Code, [{source_url, BinScriptName}]).
 
 
 get_priv_file(FileName) ->
