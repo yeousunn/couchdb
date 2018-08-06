@@ -1,3 +1,5 @@
+#!/usr/bin/env escript
+%%! +sssdcpu 128
 
 main([]) ->
   %Prompt = io_lib:format("GDB Attach to: ~s~n", [os:getpid()]),
