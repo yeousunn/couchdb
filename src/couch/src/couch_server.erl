@@ -88,7 +88,14 @@ open(DbName, Options0) ->
         Options = maybe_add_sys_db_callbacks(DbName, Options0),
         Timeout = couch_util:get_value(timeout, Options, infinity),
         Create = couch_util:get_value(create_if_missing, Options, false),
-        case gen_server:call(couch_server, {open, DbName, Options}, Timeout) of
+        Msg = case Timeout of
+            infinity ->
+                {open, DbName, Options};
+            _ when is_integer(Timeout), Timeout >= 0 ->
+                Deadline = make_deadline(Timeout),
+                {open, DbName, Options, Deadline}
+        end,
+        case gen_server:call(couch_server, Msg, Timeout) of
         {ok, Db0} ->
             {ok, Db1} = couch_db:incref(Db0),
             couch_db:set_user_ctx(Db1, Ctx);
@@ -99,6 +106,15 @@ open(DbName, Options0) ->
             Error
         end
     end.
+
+make_deadline(Timeout) when is_integer(Timeout), Timeout >= 0 ->
+    {MegaNow, SecNow, MicroNow} = os:timestamp(),
+    Now = MegaNow * 1000000 * 1000000 + SecNow * 1000000 + MicroNow,
+    Deadline = Now + round(Timeout * 1.25),
+    MegaFuture = (Deadline div 1000000) div 1000000,
+    SecFuture = (Deadline div 1000000) rem 1000000,
+    MicroFuture = Deadline rem 1000000,
+    {MegaFuture, SecFuture, MicroFuture}.
 
 update_lru(DbName, Options) ->
     case config:get_boolean("couchdb", "update_lru_on_read", false) of
@@ -467,6 +483,13 @@ handle_call({open_result, _T0, DbName, Error}, {Opener, _}, Server) ->
             % A mismatched pid means that this open_result message
             % was in our mailbox and is now stale. Ignore it.
             {reply, ok, Server}
+    end;
+handle_call({open, DbName, Options, Deadline}, From, Server) ->
+    case timer:now_diff(Deadline, os:timestamp()) of
+        N when N < 0 ->
+            {reply, {error, deadline_exceeded}, Server};
+        _ ->
+            handle_call({open, DbName, Options}, From, Server)
     end;
 handle_call({open, DbName, Options}, From, Server) ->
     case ets:lookup(couch_dbs, DbName) of
