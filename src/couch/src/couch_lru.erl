@@ -11,54 +11,167 @@
 % the License.
 
 -module(couch_lru).
--export([new/0, insert/2, update/2, close/1]).
 
--include("couch_server_int.hrl").
+
+-export([
+    new/0,
+    push/2,
+    pop/1,
+    peek_newest/1,
+    update/2,
+
+    % Test functions
+    to_list/1
+]).
+
+
+-record(node, {
+    dbname,
+    prev,
+    next
+}).
+
 
 new() ->
-    {gb_trees:empty(), dict:new()}.
+    TableOpts = [protected, set, {keypos, #node.dbname}],
+    {ets:new(?MODULE, TableOpts), undefined, undefined}.
 
-insert(DbName, {Tree0, Dict0}) ->
-    Lru = couch_util:unique_monotonic_integer(),
-    {gb_trees:insert(Lru, DbName, Tree0), dict:store(DbName, Lru, Dict0)}.
 
-update(DbName, {Tree0, Dict0}) ->
-    case dict:find(DbName, Dict0) of
-    {ok, Old} ->
-        New = couch_util:unique_monotonic_integer(),
-        Tree = gb_trees:insert(New, DbName, gb_trees:delete(Old, Tree0)),
-        Dict = dict:store(DbName, New, Dict0),
-        {Tree, Dict};
-    error ->
-        % We closed this database before processing the update.  Ignore
-        {Tree0, Dict0}
+push(DbName, T0) when is_binary(DbName) ->
+    {Table, Head, Tail} = remove(DbName, T0),
+    case {Head, Tail} of
+        {undefined, undefined} ->
+            % Empty LRU
+            ok = add_node(Table, #node{dbname = DbName}),
+            {Table, DbName, DbName};
+        {Head, Head} ->
+            % Single element LRU
+            ok = add_node(Table, #node{dbname = DbName, next = Head}),
+            ok = set_prev(Table, Head, DbName),
+            {Table, DbName, Head};
+        {Head, Tail} ->
+            ok = add_node(Table, #node{dbname = DbName, next = Head}),
+            ok = set_prev(Table, Head, DbName),
+            {Table, DbName, Tail}
     end.
 
-%% Attempt to close the oldest idle database.
-close({Tree, _} = Cache) ->
-    close_int(gb_trees:next(gb_trees:iterator(Tree)), Cache).
 
-%% internals
+pop({_Table, undefined, undefined} = T0) ->
+    {undefined, T0};
+pop({_Table, _Head, Tail} = T0) when is_binary(Tail) ->
+    {Tail, remove(Tail, T0)}.
 
-close_int(none, _) ->
-    false;
-close_int({Lru, DbName, Iter}, {Tree, Dict} = Cache) ->
-    case ets:update_element(couch_dbs, DbName, {#entry.lock, locked}) of
-    true ->
-        [#entry{db = Db, pid = Pid}] = ets:lookup(couch_dbs, DbName),
-        case couch_db:is_idle(Db) of true ->
-            true = ets:delete(couch_dbs, DbName),
-            true = ets:delete(couch_dbs_pid_to_name, Pid),
-            exit(Pid, kill),
-            {true, {gb_trees:delete(Lru, Tree), dict:erase(DbName, Dict)}};
-        false ->
-            ElemSpec = {#entry.lock, unlocked},
-            true = ets:update_element(couch_dbs, DbName, ElemSpec),
-            couch_stats:increment_counter([couchdb, couch_server, lru_skip]),
-            close_int(gb_trees:next(Iter), update(DbName, Cache))
-        end;
-    false ->
-        NewTree = gb_trees:delete(Lru, Tree),
-        NewIter = gb_trees:iterator(NewTree),
-        close_int(gb_trees:next(NewIter), {NewTree, dict:erase(DbName, Dict)})
-end.
+
+peek_newest({_Table, Head, _Tail}) ->
+    Head.
+
+
+update(DbName, {Table, _, _} = T0) when is_binary(DbName) ->
+    case get_node(Table, DbName) of
+        undefined ->
+            % We closed this database beore processing the update. Ignore
+            T0;
+        _ ->
+            push(DbName, T0)
+    end.
+
+
+to_list({_, undefined, undefined}) ->
+    [];
+to_list({_Table, Head, Head}) when is_binary(Head) ->
+    [Head];
+to_list({Table, Head, Tail}) when is_binary(Head), is_binary(Tail) ->
+    to_list(Table, Head, []).
+
+
+to_list(Table, undefined, Nodes) ->
+    true = length(Nodes) == ets:info(Table, size),
+    lists:reverse(Nodes);
+to_list(Table, Curr, Nodes) when is_binary(Curr) ->
+    false = lists:member(Curr, Nodes),
+    Node = get_node(Table, Curr),
+    to_list(Table, Node#node.next, [Curr | Nodes]).
+
+
+% Internal
+
+remove(DbName, {Table, Head, Tail}) when is_binary(DbName) ->
+    case get_node(Table, DbName) of
+        undefined ->
+            {Table, Head, Tail};
+        Node ->
+            ok = set_next(Table, Node#node.prev, Node#node.next),
+            ok = set_prev(Table, Node#node.next, Node#node.prev),
+            ok = del_node(Table, Node),
+            NewHead = if DbName /= Head -> Head; true ->
+                Node#node.next
+            end,
+            NewTail = if DbName /= Tail -> Tail; true ->
+                Node#node.prev
+            end,
+            {Table, NewHead, NewTail}
+    end.
+
+
+get_node(_Table, #node{} = Node) ->
+    Node;
+get_node(Table, DbName) ->
+    case ets:lookup(Table, DbName) of
+        [] ->
+            undefined;
+        [Node] ->
+            Node
+    end.
+
+
+%% get_next(Table, #node{next = undefined}) ->
+%%     undefined;
+%% get_next(Table, #node{next = DbName}) ->
+%%     [Node] = ets:lookup(Table, DbName),
+%%     Node;
+%% get_next(Table, DbName) when is_binary(DbName) ->
+%%     Node = #node{} = get_node(Table, DbName),
+%%     get_next(Table, Node).
+%%
+%%
+%% get_prev(Table, #node{prev = undefined}) ->
+%%     undefined;
+%% get_prev(Table, #node{prev = DbName}) ->
+%%     [Node] = ets:lookup(Table, DbName),
+%%     Node;
+%% get_prev(Table, DbName) when is_binary(DbName) ->
+%%     Node = #node{} = get_node(Table, DbName),
+%%     get_prev(Table, Node).
+
+
+add_node(Table, #node{} = Node) ->
+    true = ets:insert_new(Table, Node),
+    ok.
+
+
+del_node(Table, #node{} = Node) ->
+    MSpec = {Node, [], [true]},
+    1 = ets:select_delete(Table, [MSpec]),
+    ok.
+
+
+set_next(_, undefined, _) ->
+    ok;
+set_next(Table, #node{dbname = DbName}, Next) ->
+    set_next(Table, DbName, Next);
+set_next(Table, Node, #node{dbname = Next}) ->
+    set_next(Table, Node, Next);
+set_next(Table, NodeDbName, NextDbName) when is_binary(NodeDbName) ->
+    true = ets:update_element(Table, NodeDbName, {#node.next, NextDbName}),
+    ok.
+
+
+set_prev(_, undefined, _) ->
+    ok;
+set_prev(Table, #node{dbname = DbName}, Prev) when is_binary(DbName) ->
+    set_prev(Table, DbName, Prev);
+set_prev(Table, Node, #node{dbname = DbName}) ->
+    set_prev(Table, Node, DbName);
+set_prev(Table, NodeDbName, PrevDbName) when is_binary(NodeDbName) ->
+    true = ets:update_element(Table, NodeDbName, {#node.prev, PrevDbName}),
+    ok.

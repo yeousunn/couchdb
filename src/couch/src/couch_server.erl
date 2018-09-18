@@ -348,12 +348,69 @@ maybe_close_lru_db(#server{dbs_open=NumOpen, max_dbs_open=MaxOpen}=Server)
         when NumOpen < MaxOpen ->
     {ok, Server};
 maybe_close_lru_db(#server{lru=Lru}=Server) ->
-    case couch_lru:close(Lru) of
+    case close_lru(Lru) of
         {true, NewLru} ->
             {ok, db_closed(Server#server{lru = NewLru}, [])};
-        false ->
-            {error, all_dbs_active}
+        {false, NewLru} ->
+            {{error, all_dbs_active}, Server#server{lru = NewLru}}
     end.
+
+
+close_lru(Lru) ->
+    NewestDbName = couch_lru:peek_newest(Lru),
+    close_lru(NewestDbName, Lru).
+
+
+close_lru(NewestDbName, Lru) ->
+    case couch_lru:pop(Lru) of
+        {undefined, NewLru} ->
+            {false, NewLru};
+        {DbName, NewLru} ->
+            case close_lru_int(DbName) of
+                true ->
+                    {true, NewLru};
+                false ->
+                    case DbName == NewestDbName of
+                        true ->
+                            {false, NewLru};
+                        false ->
+                            close_lru(NewestDbName, couch_lru:push(DbName, NewLru))
+                    end;
+                skip ->
+                    case DbName == NewestDbName of
+                        true ->
+                            {false, NewLru};
+                        false ->
+                            close_lru(NewestDbName, NewLru)
+                    end
+            end
+    end.
+
+
+close_lru_int(DbName) ->
+    case ets:update_element(couch_dbs, DbName, {#entry.lock, locked}) of
+        true ->
+            [#entry{db = Db, pid = Pid}] = ets:lookup(couch_dbs, DbName),
+            case couch_db:is_idle(Db) of
+                true ->
+                    true = ets:delete(couch_dbs, DbName),
+                    true = ets:delete(couch_dbs_pid_to_name, Pid),
+                    exit(Pid, kill),
+                    true;
+                false ->
+                    ElemSpec = {#entry.lock, unlocked},
+                    true = ets:update_element(couch_dbs, DbName, ElemSpec),
+                    couch_stats:increment_counter([
+                            couchdb,
+                            couch_server,
+                            lru_skip
+                        ]),
+                    false
+            end;
+        false ->
+            skip
+    end.
+
 
 open_async(Server, From, DbName, {Module, Filepath}, Options) ->
     Parent = self(),
@@ -385,11 +442,11 @@ open_async(Server, From, DbName, {Module, Filepath}, Options) ->
     db_opened(Server, Options).
 
 handle_call(close_lru, _From, #server{lru=Lru} = Server) ->
-    case couch_lru:close(Lru) of
+    case close_lru(Lru) of
         {true, NewLru} ->
             {reply, ok, db_closed(Server#server{lru = NewLru}, [])};
-        false ->
-            {reply, {error, all_dbs_active}, Server}
+        {false, NewLru} ->
+            {reply, {error, all_dbs_active}, Server#server{lru = NewLru}}
     end;
 handle_call(open_dbs_count, _From, Server) ->
     {reply, Server#server.dbs_open, Server};
@@ -432,7 +489,7 @@ handle_call({open_result, T0, DbName, {ok, Db}}, {Opener, _}, Server) ->
             true = ets:insert(couch_dbs_pid_to_name, {DbPid, DbName}),
             Lru = case couch_db:is_system_db(Db) of
                 false ->
-                    couch_lru:insert(DbName, Server#server.lru);
+                    couch_lru:push(DbName, Server#server.lru);
                 true ->
                     Server#server.lru
             end,
@@ -478,8 +535,8 @@ handle_call({open, DbName, Options}, From, Server) ->
             {ok, Server2} ->
                 {ok, Engine} = get_engine(Server2, DbNameList),
                 {noreply, open_async(Server2, From, DbName, Engine, Options)};
-            CloseError ->
-                {reply, CloseError, Server}
+            {CloseError, Server2} ->
+                {reply, CloseError, Server2}
             end;
         Error ->
             {reply, Error, Server}
