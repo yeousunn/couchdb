@@ -204,6 +204,7 @@ cookie_authentication_handler(#httpd{mochi_req=MochiReq}=Req, AuthModule) ->
         SessionData = binary_to_term(SignedData, [safe]),
         User = couch_util:get_value(u, SessionData),
         TimeStamp = couch_util:get_value(t, SessionData),
+        HardFail = couch_util:get_value(f, SessionData),
         % Verify expiry and hash
         CurrentTime = make_cookie_time(),
         case config:get("couch_httpd_auth", "secret", undefined) of
@@ -231,10 +232,12 @@ cookie_authentication_handler(#httpd{mochi_req=MochiReq}=Req, AuthModule) ->
                                 Req#httpd{user_ctx=#user_ctx{
                                     name=User,
                                     roles=couch_util:get_value(<<"roles">>, UserProps, [])
-                                }, auth={FullSecret, TimeLeft < Timeout*0.9}};
+                                }, auth={FullSecret, TimeLeft < Timeout*0.9, HardFail}};
                             _Else ->
                                 Req
                         end;
+                    HardFail ->
+                        throw({unauthorized, <<"Cookie has expired.">>});
                     true ->
                         Req
                 end
@@ -243,7 +246,7 @@ cookie_authentication_handler(#httpd{mochi_req=MochiReq}=Req, AuthModule) ->
     end.
 
 cookie_auth_header(#httpd{user_ctx=#user_ctx{name=null}}, _Headers) -> [];
-cookie_auth_header(#httpd{user_ctx=#user_ctx{name=User}, auth={Secret, true}}=Req, Headers) ->
+cookie_auth_header(#httpd{user_ctx=#user_ctx{name=User}, auth={Secret, true, HardFail}}=Req, Headers) ->
     % Note: we only set the AuthSession cookie if:
     %  * a valid AuthSession cookie has been received
     %  * we are outside a 10% timeout window
@@ -256,7 +259,8 @@ cookie_auth_header(#httpd{user_ctx=#user_ctx{name=User}, auth={Secret, true}}=Re
     AuthSession = couch_util:get_value("AuthSession", Cookies),
     if AuthSession == undefined ->
         TimeStamp = make_cookie_time(),
-        [cookie_auth_cookie(Req, Secret, [{u, User}, {t, TimeStamp}])];
+        [cookie_auth_cookie(Req, Secret,
+            [{u, User}, {t, TimeStamp}, {f, HardFail}])];
     true ->
         []
     end;
@@ -301,6 +305,7 @@ handle_session_req(#httpd{method='POST', mochi_req=MochiReq}=Req, AuthModule) ->
     end,
     UserName = ?l2b(extract_username(Form)),
     Password = ?l2b(couch_util:get_value("password", Form, "")),
+    HardFail = couch_httpd:qs_value(Req, "hardfail", "false") == "true",
     couch_log:debug("Attempt Login: ~s",[UserName]),
     {ok, UserProps, _AuthCtx} = case AuthModule:get_user_creds(Req, UserName) of
         nil -> {ok, [], nil};
@@ -314,7 +319,7 @@ handle_session_req(#httpd{method='POST', mochi_req=MochiReq}=Req, AuthModule) ->
             UserSalt = couch_util:get_value(<<"salt">>, UserProps),
             CurrentTime = make_cookie_time(),
             Cookie = cookie_auth_cookie(Req, <<Secret/binary, UserSalt/binary>>,
-                [{u, UserName}, {t, CurrentTime}]),
+                [{u, UserName}, {t, CurrentTime}, {f, HardFail}]),
             % TODO document the "next" feature in Futon
             {Code, Headers} = case couch_httpd:qs_value(Req, "next", nil) of
                 nil ->
