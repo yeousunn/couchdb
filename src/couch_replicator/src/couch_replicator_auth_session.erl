@@ -346,10 +346,10 @@ get_session_url(Url) ->
     case lists:prefix(WithPort, Url) of
         true ->
             % Explicit port specified in the original url
-            WithPort ++ "/_session";
+            WithPort ++ "/_session?hardfail=true";
         false ->
             % Implicit proto default port was used
-            lists:concat([Proto, "://", Host, "/_session"])
+            lists:concat([Proto, "://", Host, "/_session?hardfail=true"])
     end.
 
 
