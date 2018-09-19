@@ -80,6 +80,8 @@ server_authorization_check(#httpd{path_parts=[<<"_uuids">>]}=Req) ->
     Req;
 server_authorization_check(#httpd{path_parts=[<<"_session">>]}=Req) ->
     Req;
+server_authorization_check(#httpd{path_parts=[<<"_new_session">>]}=Req) ->
+    Req;
 server_authorization_check(#httpd{path_parts=[<<"_replicate">>]}=Req) ->
     Req;
 server_authorization_check(#httpd{path_parts=[<<"_stats">>]}=Req) ->

@@ -26,6 +26,7 @@ url_handler(<<"_reload_query_servers">>) -> fun chttpd_misc:handle_reload_query_
 url_handler(<<"_replicate">>)      -> fun chttpd_misc:handle_replicate_req/1;
 url_handler(<<"_uuids">>)          -> fun chttpd_misc:handle_uuids_req/1;
 url_handler(<<"_session">>)        -> fun chttpd_auth:handle_session_req/1;
+url_handler(<<"_new_session">>)    -> fun chttpd_session_cookie:handle_session_req/1;
 url_handler(<<"_up">>)             -> fun chttpd_misc:handle_up_req/1;
 url_handler(_) -> no_match.
 
