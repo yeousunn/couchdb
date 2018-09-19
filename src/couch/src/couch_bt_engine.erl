@@ -787,7 +787,17 @@ init_state(FilePath, Fd, Header0, Options) ->
 
     Compression = couch_compress:get_compression_method(),
 
-    Header1 = couch_bt_engine_header:upgrade(Header0),
+    DiskV = couch_bt_engine_header:disk_version(Header0),
+    Header1 = case couch_bt_engine_header:latest(DiskV) of
+        undefined ->
+            % disk_version is higher that the latest version
+            % db must be the format of Clustered Purge,
+            % perform downgrade
+            downgrade_purge_info(Fd, Header0);
+        _ ->
+            couch_bt_engine_header:upgrade(Header0)
+    end,
+
     Header2 = set_default_security_object(Fd, Header1, Compression, Options),
     Header = upgrade_purge_info(Fd, Header2),
 
@@ -886,6 +896,68 @@ set_default_security_object(Fd, Header, Compression, Options) ->
             {ok, Ptr, _} = couch_file:append_term(Fd, Default, AppendOpts),
             couch_bt_engine_header:set(Header, security_ptr, Ptr)
     end.
+
+
+% Rollback for clustered purge. It replaces PurgeTreeState and PurgeSeqTreeState
+% with purged_docs disk pointer that stores only the last purge request
+downgrade_purge_info(Fd, Header) ->
+    {
+        db_header,
+        _DiskVer,
+        UpSeq,
+        _Unused,
+        IdTreeState,
+        SeqTreeState,
+        LocalTreeState,
+        PurgeTreeState,
+        PurgeSeqTreeState,
+        SecurityPtr,
+        RevsLimit,
+        Uuid,
+        Epochs,
+        CompactedSeq,
+        _PDocsLimit
+    } = Header,
+
+    {PSeq, PurgedDocsPtr} = case PurgeTreeState of
+        nil ->
+            {0, nil};
+        PurgeSeqInOldVer when is_integer(PurgeSeqInOldVer)->
+            {PurgeSeqInOldVer, nil};
+        _ when is_tuple(PurgeTreeState) ->
+            {ok, PSTree} = couch_btree:open(PurgeSeqTreeState, Fd, [
+                {split, fun ?MODULE:purge_seq_tree_split/1},
+                {join, fun ?MODULE:purge_seq_tree_join/2},
+                {reduce, fun ?MODULE:purge_tree_reduce/2}
+            ]),
+
+            Fun = fun({PurgeSeq, _, _, _}, _Reds, _Acc) ->
+                {stop, PurgeSeq}
+            end,
+            {ok, _, PurgeSeq} = couch_btree:fold(PSTree, Fun, 0, [{dir, rev}]),
+            [{ok, {PurgeSeq, _UUID, Id, Revs}}] = couch_btree:lookup(
+                PSTree, [PurgeSeq]),
+            IdRevs = [{Id, Revs}],
+            Compression = couch_compress:get_compression_method(),
+            AppendOps = [{compression, Compression}],
+            {ok, Ptr, _} = couch_file:append_term(Fd, IdRevs, AppendOps),
+            {PurgeSeq, Ptr}
+    end,
+
+    NewHeader = couch_bt_engine_header:new(),
+    couch_bt_engine_header:set(NewHeader, [
+        {update_seq, UpSeq},
+        {id_tree_state, IdTreeState},
+        {seq_tree_state, SeqTreeState},
+        {local_tree_state, LocalTreeState},
+        {purge_seq, PSeq},
+        {purged_docs, PurgedDocsPtr},
+        {security_ptr, SecurityPtr},
+        {revs_limit, RevsLimit},
+        {uuid, Uuid},
+        {epochs, Epochs},
+        {compacted_seq, CompactedSeq}
+    ]).
 
 
 % This function is here, and not in couch_bt_engine_header
