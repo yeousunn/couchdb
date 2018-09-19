@@ -356,32 +356,38 @@ maybe_close_lru_db(#server{lru=Lru}=Server) ->
     end.
 
 
-close_lru(Lru) ->
-    NewestDbName = couch_lru:peek_newest(Lru),
-    close_lru(NewestDbName, Lru).
+close_lru(Lru0) ->
+    NewestDbName = couch_lru:peek_newest(Lru0),
+    case close_lru(NewestDbName, Lru0, 0) of
+        {Status, Lru1, 0} ->
+            {Status, Lru1};
+        {Status, Lru1, Skipped} ->
+            StatName = [couchdb, couch_server, lru_skip],
+            couch_stats:increment_counter(StatName, Skipped),
+            {Status, Lru1}
+    end.
 
 
-close_lru(NewestDbName, Lru) ->
-    case couch_lru:pop(Lru) of
-        {undefined, NewLru} ->
-            {false, NewLru};
-        {DbName, NewLru} ->
+close_lru(NewestDbName, Lru0, Skipped0) ->
+    case couch_lru:pop(Lru0) of
+        {undefined, Lru1} ->
+            {false, Lru1};
+        {DbName, Lru1} ->
             case close_lru_int(DbName) of
-                true ->
-                    {true, NewLru};
-                false ->
+                closed ->
+                    {true, Lru1, Skipped0};
+                Continue ->
+                    {Lru2, Skipped1} = case Continue of
+                        skipped ->
+                            {couch_lru:push(DbName, Lru1), Skipped0 + 1};
+                        ignored ->
+                            {Lru1, Skipped0}
+                    end,
                     case DbName == NewestDbName of
                         true ->
-                            {false, NewLru};
+                            {false, Lru2, Skipped1};
                         false ->
-                            close_lru(NewestDbName, couch_lru:push(DbName, NewLru))
-                    end;
-                skip ->
-                    case DbName == NewestDbName of
-                        true ->
-                            {false, NewLru};
-                        false ->
-                            close_lru(NewestDbName, NewLru)
+                            close_lru(NewestDbName, Lru2, Skipped1)
                     end
             end
     end.
@@ -396,19 +402,14 @@ close_lru_int(DbName) ->
                     true = ets:delete(couch_dbs, DbName),
                     true = ets:delete(couch_dbs_pid_to_name, Pid),
                     exit(Pid, kill),
-                    true;
+                    closed;
                 false ->
                     ElemSpec = {#entry.lock, unlocked},
                     true = ets:update_element(couch_dbs, DbName, ElemSpec),
-                    couch_stats:increment_counter([
-                            couchdb,
-                            couch_server,
-                            lru_skip
-                        ]),
-                    false
+                    skipped
             end;
         false ->
-            skip
+            ignored
     end.
 
 
