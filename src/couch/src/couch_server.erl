@@ -396,17 +396,21 @@ close_lru(NewestDbName, Lru0, Skipped0) ->
 close_lru_int(DbName) ->
     case ets:update_element(couch_dbs, DbName, {#entry.lock, locked}) of
         true ->
-            [#entry{db = Db, pid = Pid}] = ets:lookup(couch_dbs, DbName),
-            case couch_db:is_idle(Db) of
-                true ->
-                    true = ets:delete(couch_dbs, DbName),
-                    true = ets:delete(couch_dbs_pid_to_name, Pid),
-                    exit(Pid, kill),
-                    closed;
-                false ->
-                    ElemSpec = {#entry.lock, unlocked},
-                    true = ets:update_element(couch_dbs, DbName, ElemSpec),
-                    skipped
+            case ets:lookup(couch_dbs, DbName) of
+                [#entry{req_type = delete}] ->
+                    ignored;
+                [#entry{db = Db, pid = Pid}] ->
+                    case couch_db:is_idle(Db) of
+                        true ->
+                            true = ets:delete(couch_dbs, DbName),
+                            true = ets:delete(couch_dbs_pid_to_name, Pid),
+                            exit(Pid, kill),
+                            closed;
+                        false ->
+                            Op = {#entry.lock, unlocked},
+                            true = ets:update_element(couch_dbs, DbName, Op),
+                            skipped
+                    end
             end;
         false ->
             ignored
@@ -471,6 +475,62 @@ open_async_int(Server, DbName, Options) ->
     end.
 
 
+delete_async(Server, From, DbName, Options) ->
+    Parent = self(),
+    T0 = os:timestamp(),
+    Deleter = spawn_link(fun() ->
+        Res = delete_async_int(Server, DbName, Options),
+        gen_server:call(Parent, {delete_result, DbName, Res}, infinity),
+        unlink(Parent),
+        case Res == ok of
+            true ->
+                % Track latency times for successful deletions
+                Diff = timer:now_diff(os:timestamp(), T0) / 1000,
+                couch_stats:update_histogram([couchdb, db_delete_time], Diff);
+            false ->
+                % Log unsuccessful results
+                couch_log:info("delete_result error ~p for ~s", [Res, DbName])
+        end
+    end),
+    true = ets:insert(couch_dbs, #entry{
+        name = DbName,
+        pid = Deleter,
+        lock = locked,
+        waiters = [From],
+        req_type = delete,
+        db_options = Options
+    }),
+    true = ets:insert(couch_dbs_pid_to_name, {Deleter, DbName}),
+    Server.
+
+
+delete_async_int(Server, DbName, Options) ->
+    DbNameList = binary_to_list(DbName),
+    case check_dbname(Server, DbNameList) of
+        ok ->
+            couch_db_plugin:on_delete(DbName, Options),
+
+            DelOpt = [{context, delete} | Options],
+
+            % Make sure and remove all compaction data
+            delete_compaction_files(DbNameList, Options),
+
+            {ok, {Engine, FilePath}} = get_engine(Server, DbNameList),
+            RootDir = Server#server.root_dir,
+            case couch_db_engine:delete(Engine, RootDir, FilePath, DelOpt) of
+                ok ->
+                    couch_event:notify(DbName, deleted),
+                    ok;
+                {error, enoent} ->
+                    not_found;
+                Else ->
+                    Else
+            end;
+        Error1 ->
+            Error1
+    end.
+
+
 handle_call(close_lru, _From, #server{lru=Lru} = Server) ->
     case close_lru(Lru) of
         {true, NewLru} ->
@@ -496,11 +556,11 @@ handle_call({open_result, DbName, {ok, Db}}, {Opener, _}, Server) ->
             % db was deleted during async open
             exit(DbPid, kill),
             {reply, ok, Server};
-        [#entry{pid = Opener, req_type = ReqType, waiters = Waiters} = Entry] ->
+        [#entry{pid = Opener, next_req = NextReq, waiters = Waiters} = Entry] ->
             link(DbPid),
             [gen_server:reply(Waiter, {ok, Db}) || Waiter <- Waiters],
             % Cancel the creation request if it exists.
-            case ReqType of
+            case NextReq of
                 {create, DbName, _Options, CrFrom} ->
                     gen_server:reply(CrFrom, file_exists);
                 _ ->
@@ -536,14 +596,14 @@ handle_call({open_result, DbName, Error}, {Opener, _}, Server) ->
         [] ->
             % db was deleted during async open
             {reply, ok, Server};
-        [#entry{pid = Opener, req_type = ReqType, waiters = Waiters} = Entry] ->
+        [#entry{pid = Opener, next_req = NextReq, waiters = Waiters} = Entry] ->
             [gen_server:reply(Waiter, Error) || Waiter <- Waiters],
             true = ets:delete(couch_dbs, DbName),
             true = ets:delete(couch_dbs_pid_to_name, Opener),
-            NewServer = case ReqType of
+            NewServer = case NextReq of
                 {create, DbName, Options, CrFrom} ->
                     open_async(Server, CrFrom, DbName, Options);
-                _ ->
+                undefined ->
                     Server
             end,
             {reply, ok, db_closed(NewServer, Entry#entry.db_options)};
@@ -552,6 +612,20 @@ handle_call({open_result, DbName, Error}, {Opener, _}, Server) ->
             % was in our mailbox and is now stale. Ignore it.
             {reply, ok, Server}
     end;
+handle_call({delete_result, DbName, Res}, {Deleter, _}, Server) ->
+    true = ets:delete(couch_dbs_pid_to_name, Deleter),
+    % Assert that we're not mixing up deletion requests with
+    % anything else as that would be hair on fire bad.
+    [#entry{pid = Deleter} = Entry] = ets:lookup(couch_dbs, DbName),
+    true = ets:delete(couch_dbs, DbName),
+    [gen_server:reply(Waiter, Res) || Waiter <- Entry#entry.waiters],
+    NewServer = case Entry#entry.next_req of
+        {create, DbName, Options, CrFrom} ->
+            open_async(Server, CrFrom, DbName, Options);
+        undefined ->
+            Server
+    end,
+    {noreply, NewServer};
 handle_call({open, DbName, Options}, From, Server) ->
     case ets:lookup(couch_dbs, DbName) of
     [] ->
@@ -561,6 +635,8 @@ handle_call({open, DbName, Options}, From, Server) ->
         {CloseError, Server2} ->
             {reply, CloseError, Server2}
         end;
+    [#entry{req_type = delete}] ->
+        {reply, {error, file_not_found}, Server};
     [#entry{waiters = Waiters} = Entry] when is_list(Waiters) ->
         true = ets:insert(couch_dbs, Entry#entry{waiters = [From | Waiters]}),
         NumWaiters = length(Waiters),
@@ -582,57 +658,38 @@ handle_call({create, DbName, Options}, From, Server) ->
             {CloseError, Server2} ->
                 {reply, CloseError, Server2}
         end;
-    [#entry{req_type = open} = Entry] ->
+    [#entry{req_type = RT} = Entry] when RT == open; RT == delete ->
         % We're trying to create a database while someone is in
-        % the middle of trying to open it. We allow one creator
-        % to wait while we figure out if it'll succeed.
+        % the middle of trying to open or delete it. We allow one
+        % creator to wait while we figure out if it'll succeed.
         CrOptions = [create | Options],
         Req = {create, DbName, CrOptions, From},
-        true = ets:insert(couch_dbs, Entry#entry{req_type = Req}),
+        true = ets:insert(couch_dbs, Entry#entry{next_req = Req}),
         {noreply, Server};
     [_AlreadyRunningDb] ->
         {reply, file_exists, Server}
     end;
-handle_call({delete, DbName, Options}, _From, Server) ->
-    DbNameList = binary_to_list(DbName),
-    case check_dbname(Server, DbNameList) of
-    ok ->
-        Server2 =
-        case ets:lookup(couch_dbs, DbName) of
-        [] -> Server;
-        [#entry{pid = Pid, waiters = Waiters} = Entry] when is_list(Waiters) ->
-            true = ets:delete(couch_dbs, DbName),
-            true = ets:delete(couch_dbs_pid_to_name, Pid),
-            exit(Pid, kill),
-            [gen_server:reply(Waiter, not_found) || Waiter <- Waiters],
-            db_closed(Server, Entry#entry.db_options);
-        [#entry{pid = Pid} = Entry] ->
-            true = ets:delete(couch_dbs, DbName),
-            true = ets:delete(couch_dbs_pid_to_name, Pid),
-            exit(Pid, kill),
-            db_closed(Server, Entry#entry.db_options)
+handle_call({delete, DbName, Options}, From, Server) ->
+    case ets:lookup(couch_dbs, DbName) of
+    [] ->
+        {noreply, delete_async(Server, From, DbName, Options)};
+    [#entry{req_type = delete, waiters = Waiters} = Entry] ->
+        true = ets:insert(couch_dbs, Entry#entry{waiters = [From | Waiters]}),
+        NumWaiters = length(Waiters),
+        if NumWaiters =< 10 orelse NumWaiters rem 10 /= 0 -> ok; true ->
+            Fmt = "~b clients waiting to delete db ~s",
+            couch_log:info(Fmt, [length(Waiters), DbName])
         end,
-
-        couch_db_plugin:on_delete(DbName, Options),
-
-        DelOpt = [{context, delete} | Options],
-
-        % Make sure and remove all compaction data
-        delete_compaction_files(DbNameList, Options),
-
-        {ok, {Engine, FilePath}} = get_engine(Server, DbNameList),
-        RootDir = Server#server.root_dir,
-        case couch_db_engine:delete(Engine, RootDir, FilePath, DelOpt) of
-        ok ->
-            couch_event:notify(DbName, deleted),
-            {reply, ok, Server2};
-        {error, enoent} ->
-            {reply, not_found, Server2};
-        Else ->
-            {reply, Else, Server2}
-        end;
-    Error ->
-        {reply, Error, Server}
+        {noreply, Server};
+    [#entry{pid = Pid, waiters = Waiters} = Entry] ->
+        true = ets:delete(couch_dbs, DbName),
+        true = ets:delete(couch_dbs_pid_to_name, Pid),
+        exit(Pid, kill),
+        if not is_list(Waiters) -> ok; true ->
+            [gen_server:reply(Waiter, not_found) || Waiter <- Waiters]
+        end,
+        NewServer = db_closed(Server, Entry#entry.db_options),
+        {noreply, delete_async(NewServer, From, DbName, Options)}
     end;
 handle_call({db_updated, Db}, _From, Server0) ->
     DbName = couch_db:name(Db),
@@ -696,7 +753,7 @@ handle_info({'EXIT', Pid, Reason}, Server) ->
         % We kill databases on purpose so there's no reason
         % to log that fact. So we restrict logging to "interesting"
         % reasons.
-        if Reason /= normal orelse Reason /= killed ->
+        if Reason == normal orelse Reason == killed -> ok; true ->
             couch_log:info("db ~s died with reason ~p", [DbName, Reason])
         end,
         if not is_list(Waiters) -> ok; true ->

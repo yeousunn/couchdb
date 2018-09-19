@@ -18,6 +18,7 @@
     lock,
     waiters,
     req_type,
+    next_req,
     db_options,
     start_time
 }).
