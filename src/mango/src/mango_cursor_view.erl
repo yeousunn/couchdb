@@ -68,6 +68,14 @@ explain(Cursor) ->
     BaseArgs = base_args(Cursor),
     Args = apply_opts(Opts, BaseArgs),
 
+    PartitionInfo = case lists:keyfind(partitioned, 1, Args#mrargs.extra) of 
+        {partitioned, true} ->
+            Partition = lists:keyfind(partition, 1, Args#mrargs.extra),
+            [{partitioned, true}, Partition];
+        _ ->
+            []
+    end,
+
     [{mrargs, {[
         {include_docs, Args#mrargs.include_docs},
         {view_type, Args#mrargs.view_type},
@@ -77,9 +85,8 @@ explain(Cursor) ->
         {direction, Args#mrargs.direction},
         {stable, Args#mrargs.stable},
         {update, Args#mrargs.update},
-        {conflicts, Args#mrargs.conflicts},
-        {extra, {Args#mrargs.extra}}
-    ]}}].
+        {conflicts, Args#mrargs.conflicts}
+    ] ++ PartitionInfo}}].
 
 
 % replace internal values that cannot
