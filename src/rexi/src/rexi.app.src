@@ -12,7 +12,7 @@
 
 {application, rexi, [
     {description, "Lightweight RPC server"},
-    {vsn, git},
+    {vsn, "2.3.0-f18d602"},{id, "f18d602"},
     {modules, [
         rexi,
         rexi_app,
