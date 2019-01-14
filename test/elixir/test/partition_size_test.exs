@@ -74,6 +74,18 @@ defmodule PartitionSizeTest do
     assert info["sizes"]["active"] == 0
   end
 
+  defp compact(db) do
+    assert Couch.post("/#{db}/_compact").status_code == 202
+
+    retry_until(
+      fn ->
+        Couch.get("/#{db}").body["compact_running"] == false
+      end,
+      200,
+      20_000
+    )
+  end
+
   test "simple partition size", context do
     db_name = context[:db_name]
     save_doc(db_name, %{_id: "foo:bar", val: 42})
@@ -261,5 +273,94 @@ defmodule PartitionSizeTest do
 
     db_info = get_db_info(db_name)
     assert esize == db_info["sizes"]["external"]
+  end
+
+  test "compaction decreases size of partition", context do
+    db_name = context[:db_name]
+    mk_docs(db_name)
+
+    partition = "000"
+
+    doc_id = "#{partition}:doc-with-attachment"
+    doc = %{
+      _id: doc_id,
+      _attachments: %{
+        "foo.txt": %{
+          content_type: "text/plain",
+          data: Base.encode64("This is a text document to save")
+        }
+      }
+    }
+
+
+    doc_rev = save_doc(db_name, doc)
+
+    resp = Couch.delete("/#{db_name}/#{doc_id}", query: %{rev: doc_rev})
+    assert resp.status_code == 200
+
+    info1 = get_partition_info(db_name, partition)
+
+    compact(db_name)
+
+    info2 = get_partition_info(db_name, partition)
+
+    assert info2["sizes"]["active"] <= info1["sizes"]["active"]
+    assert info2["sizes"]["external"] <= info1["sizes"]["external"]
+  end
+
+  test "partition activity not affect other partition sizes", context do
+    db_name = context[:db_name]
+    mk_docs(db_name)
+
+    partition1 = "000"
+    partition2 = "001"
+
+    doc_id = "#{partition1}:doc-with-attachment"
+
+    info2 = get_partition_info(db_name, partition2)
+
+    doc = %{
+      _id: doc_id,
+      _attachments: %{
+        "foo.txt": %{
+          content_type: "text/plain",
+          data: Base.encode64("This is a text document to save")
+        }
+      }
+    }
+
+    doc_rev = save_doc(db_name, doc)
+
+    info2_attach = get_partition_info(db_name, partition2)
+    assert info2 == info2_attach
+
+    doc = Enum.into(%{
+      another: "add another field",
+      _rev: doc_rev
+    }, doc)
+
+    doc_rev = save_doc(db_name, doc)
+
+    info2_update = get_partition_info(db_name, partition2)
+    assert info2 == info2_update
+
+    resp = Couch.delete("/#{db_name}/#{doc_id}", query: %{rev: doc_rev})
+    assert resp.status_code == 200
+
+    compact(db_name)
+
+    info2_compact = get_partition_info(db_name, partition2)
+    assert info2 == info2_compact
+  end
+
+  test "unknown partition return's zero", context do
+    db_name = context[:db_name]
+    mk_docs(db_name)
+
+    info = get_partition_info(db_name, "unknown")
+    assert info["doc_count"] == 0
+    assert info["doc_del_count"] == 0
+    assert info["sizes"]["external"] == 0
+    assert info["sizes"]["active"] == 0
   end
 end
