@@ -1,5 +1,6 @@
 defmodule PartitionSizeTest do
   use CouchTestCase
+  import PartitionHelpers
 
   @moduledoc """
   Test Partition size functionality
@@ -83,6 +84,17 @@ defmodule PartitionSizeTest do
     assert info["doc_del_count"] == 0
     assert info["sizes"]["external"] > 0
     assert info["sizes"]["active"] > 0
+  end
+
+  test "get partition size for curd", context do
+    db_name = context[:db_name]
+    crud_partition_doc(db_name, "pk1")
+  end
+
+  test "get partition size for multipe curd", context do
+    db_name = context[:db_name]
+    crud_partition_doc(db_name, "pk1")
+    crud_partition_doc(db_name, "pk2")
   end
 
   test "adding docs increases partition sizes", context do
