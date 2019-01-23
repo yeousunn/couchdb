@@ -45,7 +45,7 @@ teardown({Db, SocketOptions}) ->
     end.
 
 
-socket_buffer_size_test_() ->
+socket_buffer_size_test() ->
     {
         "chttpd socket_buffer_size_test",
         {
