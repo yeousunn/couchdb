@@ -38,8 +38,10 @@
     get_non_deleted_rev/3,
 
     get_doc_body/3,
+    get_local_doc/2,
 
     write_doc/6,
+    write_local_doc/2,
 
     fold_docs/4,
     fold_changes/5,
@@ -396,6 +398,17 @@ get_doc_body(#{} = Db0, DocId, RevInfo) ->
     fdb_to_doc(Db, DocId, RevPos, [Rev | RevPath], Val).
 
 
+get_local_doc(#{} = Db0, <<?LOCAL_DOC_PREFIX, _/binary>> = DocId) ->
+    #{
+        tx := Tx,
+        db_prefix := DbPrefix
+    } = Db = ensure_current(Db0),
+
+    Key = erlfdb_tuple:pack({?DB_LOCAL_DOCS, DocId}, DbPrefix),
+    Val = erlfdb:wait(erlfdb:get(Tx, Key)),
+    fdb_to_local_doc(Db, DocId, Val).
+
+
 write_doc(#{} = Db0, Doc, NewWinner0, OldWinner, ToUpdate, ToRemove) ->
     #{
         tx := Tx,
@@ -468,16 +481,59 @@ write_doc(#{} = Db0, Doc, NewWinner0, OldWinner, ToUpdate, ToRemove) ->
 
     ok = write_doc_body(Db, Doc),
 
+    IsDDoc = case Doc#doc.id of
+        <<?DESIGN_DOC_PREFIX, _/binary>> -> true;
+        _ -> false
+    end,
+
     case UpdateStatus of
         created ->
+            if not IsDDoc -> ok; true ->
+                incr_stat(Db, <<"doc_design_count">>, 1)
+            end,
             incr_stat(Db, <<"doc_count">>, 1);
         recreated ->
+            if not IsDDoc -> ok; true ->
+                incr_stat(Db, <<"doc_design_count">>, 1)
+            end,
             incr_stat(Db, <<"doc_count">>, 1),
             incr_stat(Db, <<"doc_del_count">>, -1);
         deleted ->
+            if not IsDDoc -> ok; true ->
+                incr_stat(Db, <<"doc_design_count">>, -1)
+            end,
             incr_stat(Db, <<"doc_count">>, -1),
             incr_stat(Db, <<"doc_del_count">>, 1);
         updated ->
+            ok
+    end,
+
+    ok.
+
+
+write_local_doc(#{} = Db0, Doc) ->
+    #{
+        tx := Tx
+    } = Db = ensure_current(Db0),
+
+    {LDocKey, LDocVal} = local_doc_to_fdb(Db, Doc),
+
+    WasDeleted = case erlfdb:wait(erlfdb:get(Tx, LDocKey)) of
+        <<_/binary>> -> false;
+        not_found -> true
+    end,
+
+    case Doc#doc.deleted of
+        true -> erlfdb:clear(Tx, LDocKey);
+        false -> erlfdb:set(Tx, LDocKey, LDocVal)
+    end,
+
+    case {WasDeleted, Doc#doc.deleted} of
+        {true, false} ->
+            incr_stat(Db, <<"doc_local_count">>, 1);
+        {false, true} ->
+            incr_stat(Db, <<"doc_local_count">>, -1);
+        _ ->
             ok
     end,
 
@@ -696,6 +752,39 @@ fdb_to_doc(_Db, DocId, Pos, Path, Bin) when is_binary(Bin) ->
         deleted = Deleted
     };
 fdb_to_doc(_Db, _DocId, _Pos, _Path, not_found) ->
+    {not_found, missing}.
+
+
+local_doc_to_fdb(Db, #doc{} = Doc) ->
+    #{
+        db_prefix := DbPrefix
+    } = Db,
+
+    #doc{
+        id = Id,
+        revs = {0, [Rev]},
+        body = Body
+    } = Doc,
+
+    StoreRev = case Rev of
+        _ when is_integer(Rev) -> integer_to_binary(Rev);
+        _ when is_binary(Rev) -> Rev
+    end,
+
+    Key = erlfdb_tuple:pack({?DB_LOCAL_DOCS, Id}, DbPrefix),
+    Val = {StoreRev, Body},
+    {Key, term_to_binary(Val, [{minor_version, 1}])}.
+
+
+fdb_to_local_doc(_Db, DocId, Bin) when is_binary(Bin) ->
+    {Rev, Body} = binary_to_term(Bin, [safe]),
+    #doc{
+        id = DocId,
+        revs = {0, [Rev]},
+        deleted = false,
+        body = Body
+    };
+fdb_to_local_doc(_Db, _DocId, not_found) ->
     {not_found, missing}.
 
 

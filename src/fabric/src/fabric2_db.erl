@@ -390,6 +390,14 @@ open_doc(#{} = Db, DocId) ->
     open_doc(Db, DocId, []).
 
 
+open_doc(#{} = Db, <<?LOCAL_DOC_PREFIX, _/binary>> = DocId, _Options) ->
+    fabric2_fdb:transactional(Db, fun(TxDb) ->
+        case fabric2_fdb:get_local_doc(TxDb, DocId) of
+            #doc{} = Doc -> {ok, Doc};
+            Else -> Else
+        end
+    end);
+
 open_doc(#{} = Db, DocId, _Options) ->
     fabric2_fdb:transactional(Db, fun(TxDb) ->
         case fabric2_fdb:get_winning_revs(TxDb, DocId, 1) of
@@ -407,7 +415,7 @@ open_doc(#{} = Db, DocId, _Options) ->
 open_doc_revs(Db, DocId, Revs, Options) ->
     Latest = lists:member(latest, Options),
     fabric2_fdb:transactional(Db, fun(TxDb) ->
-        AllRevInfos = fabric2_fdb:get_all_revs(Db, DocId),
+        AllRevInfos = fabric2_fdb:get_all_revs(TxDb, DocId),
         RevTree = lists:foldl(fun(RI, TreeAcc) ->
             RIPath = fabric2_util:revinfo_to_path(RI),
             {Merged, _} = couch_key_tree:merge(TreeAcc, RIPath),
@@ -421,13 +429,17 @@ open_doc_revs(Db, DocId, Revs, Options) ->
             _ ->
                 couch_key_tree:get(RevTree, Revs)
         end,
-        Docs = lists:map(fun({Value, {Pos, [Rev | _]} = RevPath}) ->
+        Docs = lists:map(fun({Value, {Pos, [Rev | RevPath]}}) ->
             case Value of
                 ?REV_MISSING ->
                     % We have the rev in our list but know nothing about it
                     {{not_found, missing}, {Pos, Rev}};
                 _ ->
-                    case fabric2_fdb:get_doc_body(TxDb, DocId, RevPath) of
+                    RevInfo = #{
+                        rev_id => {Pos, Rev},
+                        rev_path => RevPath
+                    },
+                    case fabric2_fdb:get_doc_body(TxDb, DocId, RevInfo) of
                         #doc{} = Doc -> {ok, Doc};
                         Else -> {Else, {Pos, Rev}}
                     end
@@ -467,7 +479,7 @@ update_docs(Db, Docs, Options) ->
             case update_doc_int(TxDb, Doc, Options) of
                 {ok, _} = Resp ->
                     {Resp, Acc};
-                {error, _} = Resp ->
+                Resp ->
                     {Resp, error}
             end
         end)
@@ -626,10 +638,16 @@ get_members(SecProps) ->
 
 % TODO: Handle _local docs separately.
 update_doc_int(#{} = Db, #doc{} = Doc, Options) ->
+    IsLocal = case Doc#doc.id of
+        <<?LOCAL_DOC_PREFIX, _/binary>> -> true;
+        _ -> false
+    end,
+    IsReplicated = lists:member(replicated_changes, Options),
     try
-        case lists:member(replicated_changes, Options) of
-            false -> update_doc_interactive(Db, Doc, Options);
-            true -> update_doc_replicated(Db, Doc, Options)
+        case {IsLocal, IsReplicated} of
+            {false, false} -> update_doc_interactive(Db, Doc, Options);
+            {false, true} -> update_doc_replicated(Db, Doc, Options);
+            {true, _} -> update_local_doc(Db, Doc, Options)
         end
     catch throw:{?MODULE, Return} ->
         Return
@@ -839,6 +857,18 @@ update_doc_replicated(Db, Doc0, _Options) ->
     {ok, []}.
 
 
+update_local_doc(Db, Doc0, _Options) ->
+    Doc1 = case increment_local_doc_rev(Doc0) of
+        {ok, Updated} -> Updated;
+        {error, _} = Error -> ?RETURN(Error)
+    end,
+
+    ok = fabric2_fdb:write_local_doc(Db, Doc1),
+
+    #doc{revs = {0, [Rev]}} = Doc1,
+    {ok, {0, integer_to_binary(Rev)}}.
+
+
 prep_and_validate(Db, Doc, PrevRevInfo) ->
     HasStubs = couch_doc:has_stubs(Doc),
     HasVDUs = [] /= maps:get(validate_doc_update_funs, Db),
@@ -871,8 +901,6 @@ validate_doc_update(Db, #doc{id = <<"_design/", _/binary>>} = Doc, _) ->
         ok -> validate_ddoc(Db, Doc);
         Error -> ?RETURN(Error)
     end;
-validate_doc_update(_Db, #doc{id = <<"_local/", _/binary>>}, _) ->
-    ok;
 validate_doc_update(Db, Doc, PrevDoc) ->
     #{
         security_doc := Security,
@@ -925,6 +953,21 @@ find_prev_revinfo(Pos, [{_Rev, ?REV_MISSING} | RestPath]) ->
     find_prev_revinfo(Pos - 1, RestPath);
 find_prev_revinfo(_Pos, [{_Rev, #{} = RevInfo} | _]) ->
     RevInfo.
+
+
+increment_local_doc_rev(#doc{deleted = true} = Doc) ->
+    {ok, Doc#doc{revs = {0, [0]}}};
+increment_local_doc_rev(#doc{revs = {0, []}} = Doc) ->
+    {ok, Doc#doc{revs = {0, [1]}}};
+increment_local_doc_rev(#doc{revs = {0, [RevStr | _]}} = Doc) ->
+    try
+        PrevRev = binary_to_integer(RevStr),
+        {ok, Doc#doc{revs = {0, [PrevRev + 1]}}}
+    catch error:badarg ->
+        {error, <<"Invalid rev format">>}
+    end;
+increment_local_doc_rev(#doc{}) ->
+    {error, <<"Invalid rev format">>}.
 
 
 doc_to_revid(#doc{revs = Revs}) ->
