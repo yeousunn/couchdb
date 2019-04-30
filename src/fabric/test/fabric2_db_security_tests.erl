@@ -47,7 +47,7 @@ security_test_() ->
 setup() ->
     Ctx = test_util:start_couch([fabric]),
     DbName = ?tempdb(),
-    {ok, Db1} = fabric2_db:create(DbName, []),
+    {ok, Db1} = fabric2_db:create(DbName, [{user_ctx, ?ADMIN_USER}]),
     SecProps = {[
         {<<"admins">>, {[
             {<<"names">>, [<<"admin_name1">>, <<"admin_name2">>]},

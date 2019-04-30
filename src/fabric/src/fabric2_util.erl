@@ -19,6 +19,8 @@
 
     user_ctx_to_json/1,
 
+    validate_security_object/1,
+
     get_value/2,
     get_value/3,
     to_hex/1,
@@ -66,6 +68,37 @@ user_ctx_to_json(Db) ->
         {<<"name">>, UserCtx#user_ctx.name},
         {<<"roles">>, UserCtx#user_ctx.roles}
     ]}.
+
+
+validate_security_object({SecProps}) ->
+    Admins = get_value(<<"admins">>, SecProps, {[]}),
+    ok = validate_names_and_roles(Admins),
+
+    % we fallback to readers here for backwards compatibility
+    Readers = get_value(<<"readers">>, SecProps, {[]}),
+    Members = get_value(<<"members">>, SecProps, Readers),
+    ok = validate_names_and_roles(Members).
+
+
+validate_names_and_roles({Props}) when is_list(Props) ->
+    validate_json_list_of_strings(<<"names">>, Props),
+    validate_json_list_of_strings(<<"roles">>, Props);
+validate_names_and_roles(_) ->
+    throw("admins or members must be a JSON list of strings").
+
+
+validate_json_list_of_strings(Member, Props) ->
+    case get_value(Member, Props, []) of
+        Values when is_list(Values) ->
+            NonBinary = lists:filter(fun(V) -> not is_binary(V) end, Values),
+            if NonBinary == [] -> ok; true ->
+                MemberStr = binary_to_list(Member),
+                throw(MemberStr ++ " must be a JSON list of strings")
+            end;
+        _ ->
+            MemberStr = binary_to_list(Member),
+            throw(MemberStr ++ " must be a JSON list of strings")
+    end.
 
 
 get_value(Key, List) ->

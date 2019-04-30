@@ -13,6 +13,7 @@
 -module(fabric2_db_misc_tests).
 
 
+-include_lib("couch/include/couch_db.hrl").
 -include_lib("couch/include/couch_eunit.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
@@ -30,6 +31,8 @@ misc_test_() ->
             {with, [
                 fun empty_db_info/1,
                 fun accessors/1,
+                fun set_revs_limit/1,
+                fun set_security/1,
                 fun is_system_db/1,
                 fun ensure_full_commit/1
             ]}
@@ -40,7 +43,7 @@ misc_test_() ->
 setup() ->
     Ctx = test_util:start_couch([fabric]),
     DbName = ?tempdb(),
-    {ok, Db} = fabric2_db:create(DbName, []),
+    {ok, Db} = fabric2_db:create(DbName, [{user_ctx, ?ADMIN_USER}]),
     {DbName, Db, Ctx}.
 
 
@@ -72,7 +75,26 @@ accessors({DbName, Db, _}) ->
     ?assertMatch(<<_:32/binary>>, fabric2_db:get_uuid(Db)),
     ?assertEqual(true, fabric2_db:is_db(Db)),
     ?assertEqual(false, fabric2_db:is_db(#{})),
-    ?assertEqual(false, fabric2_db:is_partitioned(Db)).
+    ?assertEqual(false, fabric2_db:is_partitioned(Db)),
+    ?assertEqual(false, fabric2_db:is_clustered(Db)).
+
+
+set_revs_limit({DbName, Db, _}) ->
+    ?assertEqual(ok, fabric2_db:set_revs_limit(Db, 500)),
+    {ok, Db2} = fabric2_db:open(DbName, []),
+    ?assertEqual(500, fabric2_db:get_revs_limit(Db2)).
+
+
+set_security({DbName, Db, _}) ->
+    SecObj = {[
+        {<<"admins">>, {[
+            {<<"names">>, []},
+            {<<"roles">>, []}
+        ]}}
+    ]},
+    ?assertEqual(ok, fabric2_db:set_security(Db, SecObj)),
+    {ok, Db2} = fabric2_db:open(DbName, []),
+    ?assertEqual(SecObj, fabric2_db:get_security(Db2)).
 
 
 is_system_db({DbName, Db, _}) ->

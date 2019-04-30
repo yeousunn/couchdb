@@ -355,6 +355,7 @@ is_system_db_name(DbName) when is_binary(DbName) ->
 
 
 set_revs_limit(#{} = Db, RevsLimit) ->
+    check_is_admin(Db),
     RevsLimBin = ?uint2bin(RevsLimit),
     Resp = fabric2_fdb:transactional(Db, fun(TxDb) ->
         fabric2_fdb:set_config(TxDb, <<"revs_limit">>, RevsLimBin)
@@ -365,6 +366,8 @@ set_revs_limit(#{} = Db, RevsLimit) ->
 
 
 set_security(#{} = Db, Security) ->
+    check_is_admin(Db),
+    ok = fabric2_util:validate_security_object(Security),
     SecBin = ?JSON_ENCODE(Security),
     Resp = fabric2_fdb:transactional(Db, fun(TxDb) ->
         fabric2_fdb:set_config(TxDb, <<"security_doc">>, SecBin)
