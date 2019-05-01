@@ -21,9 +21,9 @@
 -define(DOC_COUNT, 10).
 
 
-doc_crud_test_() ->
+doc_count_test_() ->
     {
-        "Test document CRUD operations",
+        "Test document counting operations",
         {
             setup,
             fun setup/0,
@@ -233,8 +233,6 @@ local_docs({Db, _}) ->
             DDocCount,
             LDocCount + ?DOC_COUNT
         ).
-
-
 
 
 get_doc_counts(Db) ->

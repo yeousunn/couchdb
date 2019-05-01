@@ -248,9 +248,10 @@ get_info(#{} = Db) ->
 
     RawSeq = case erlfdb:wait(ChangesFuture) of
         [] ->
-            <<0:80>>;
+            fabric2_util:seq_zero();
         [{SeqKey, _}] ->
-            {?DB_CHANGES, SeqBin} = erlfdb_tuple:unpack(SeqKey, DbPrefix),
+            {?DB_CHANGES, SeqVS} = erlfdb_tuple:unpack(SeqKey, DbPrefix),
+            <<51:8, SeqBin:13/binary>> = erlfdb_tuple:pack({SeqVS}),
             SeqBin
     end,
     CProp = {update_seq, fabric2_util:to_hex(RawSeq)},
@@ -425,18 +426,18 @@ write_doc(#{} = Db0, Doc, NewWinner0, OldWinner, ToUpdate, ToRemove) ->
     NewWinner = NewWinner0#{winner := true},
     NewRevId = maps:get(rev_id, NewWinner),
 
-    {WKey, WVal} = revinfo_to_fdb(DbPrefix, DocId, NewWinner),
+    {WKey, WVal, WinnerVS} = revinfo_to_fdb(Tx, DbPrefix, DocId, NewWinner),
     ok = erlfdb:set_versionstamped_value(Tx, WKey, WVal),
 
     lists:foreach(fun(RI0) ->
         RI = RI0#{winner := false},
-        {K, V} = revinfo_to_fdb(DbPrefix, DocId, RI),
+        {K, V, undefined} = revinfo_to_fdb(Tx, DbPrefix, DocId, RI),
         ok = erlfdb:set(Tx, K, V)
     end, ToUpdate),
 
     lists:foreach(fun(RI0) ->
         RI = RI0#{winner := false},
-        {K, _} = revinfo_to_fdb(DbPrefix, DocId, RI),
+        {K, _, undefined} = revinfo_to_fdb(Tx, DbPrefix, DocId, RI),
         ok = erlfdb:clear(Tx, K)
     end, ToRemove),
 
@@ -473,7 +474,7 @@ write_doc(#{} = Db0, Doc, NewWinner0, OldWinner, ToUpdate, ToRemove) ->
         erlfdb:clear(Tx, OldSeqKey)
     end,
 
-    NewSeqKey = erlfdb_tuple:pack_vs({?DB_CHANGES, ?UNSET_VS}, DbPrefix),
+    NewSeqKey = erlfdb_tuple:pack_vs({?DB_CHANGES, WinnerVS}, DbPrefix),
     NewSeqVal = erlfdb_tuple:pack({DocId, Deleted, NewRevId}),
     erlfdb:set_versionstamped_key(Tx, NewSeqKey, NewSeqVal),
 
@@ -549,77 +550,95 @@ write_doc_body(#{} = Db0, #doc{} = Doc) ->
     erlfdb:set(Tx, NewDocKey, NewDocVal).
 
 
-fold_docs(#{} = Db, UserFun, UserAcc0, _Options) ->
+fold_docs(#{} = Db, UserFun, UserAcc0, Options) ->
     #{
         tx := Tx,
         db_prefix := DbPrefix
     } = ensure_current(Db),
+
+    {Reverse, Start, End} = get_dir_and_bounds(DbPrefix, Options),
 
     DocCountKey = erlfdb_tuple:pack({?DB_STATS, <<"doc_count">>}, DbPrefix),
-    DocCountFuture = erlfdb:get(Tx, DocCountKey),
+    DocCountBin = erlfdb:wait(erlfdb:get(Tx, DocCountKey)),
 
-    {Start, End} = erlfdb_tuple:range({?DB_ALL_DOCS}, DbPrefix),
-    RangeFuture = erlfdb:get_range(Tx, Start, End),
+    try
+        UserAcc1 = maybe_stop(UserFun({meta, [
+            {total, ?bin2uint(DocCountBin)},
+            {offset, null}
+        ]}, UserAcc0)),
 
-    DocCount = ?bin2uint(erlfdb:wait(DocCountFuture)),
+        UserAcc2 = erlfdb:fold_range(Tx, Start, End, fun({K, V}, UserAccIn) ->
+            {?DB_ALL_DOCS, DocId} = erlfdb_tuple:unpack(K, DbPrefix),
+            RevId = erlfdb_tuple:unpack(V),
+            maybe_stop(UserFun({row, [
+                {id, DocId},
+                {key, DocId},
+                {value, couch_doc:rev_to_str(RevId)}
+            ]}, UserAccIn))
+        end, UserAcc1, [{reverse, Reverse}]),
 
-    {ok, UserAcc1} = UserFun({meta, [
-        {total, DocCount},
-        {offset, null}
-    ]}, UserAcc0),
-
-    UserAcc2 = lists:foldl(fun({K, V}, Acc) ->
-        {?DB_ALL_DOCS, DocId} = erlfdb_tuple:unpack(K, DbPrefix),
-        RevId = erlfdb_tuple:unpack(V),
-
-        {ok, NewAcc} = UserFun({row, [
-            {id, DocId},
-            {key, DocId},
-            {value, couch_doc:rev_to_str(RevId)}
-        ]}, Acc),
-
-        NewAcc
-    end, UserAcc1, erlfdb:wait(RangeFuture)),
-
-    UserFun(complete, UserAcc2).
+        {ok, maybe_stop(UserFun(complete, UserAcc2))}
+    catch throw:{stop, FinalUserAcc} ->
+        {ok, FinalUserAcc}
+    end.
 
 
-fold_changes(#{} = Db, SinceSeq, UserFun, UserAcc0, _Options) ->
+fold_changes(#{} = Db, SinceSeq0, UserFun, UserAcc0, Options) ->
     #{
         tx := Tx,
         db_prefix := DbPrefix
     } = ensure_current(Db),
 
-    {Start0, End} = erlfdb_tuple:range({?DB_CHANGES}, DbPrefix),
-    Start = erlang:max(Start0, SinceSeq),
-    Future = erlfdb:get_range(Tx, Start, End),
+    SinceSeq1 = fabric2_util:from_hex(SinceSeq0),
+    SinceSeq2 = <<51:8, SinceSeq1/binary>>,
 
-    {ok, UserAcc1} = UserFun(start, UserAcc0),
+    Reverse = case fabric2_util:get_value(dir, Options, fwd) of
+        fwd -> false;
+        rev -> true
+    end,
 
-    UserAcc2 = lists:foldl(fun({K, V}, Acc) ->
-        {?DB_CHANGES, UpdateSeq} = erlfdb_tuple:unpack(K, DbPrefix),
-        {DocId, Deleted, RevId} = erlfdb_tuple:unpack(V),
+    {Start0, End0} = case Reverse of
+        false ->
+            {{?DB_CHANGES, SinceSeq2}, {?DB_CHANGES, <<16#FF>>}};
+        true ->
+            {{?DB_CHANGES}, {?DB_CHANGES, SinceSeq2}}
+    end,
 
-        UpdateSeqEJson = fabric2_util:to_hex(erlfdb_tuple:pack({UpdateSeq})),
+    Start = erlfdb_tuple:pack(Start0, DbPrefix),
+    End = erlfdb_tuple:pack(End0, DbPrefix),
 
-        DelMember = if not Deleted -> []; true ->
-            [{deleted, true}]
-        end,
+    try
+        put('$last_changes_seq', SinceSeq0),
 
-        {ok, NewAcc} = UserFun({change, {[
-            {seq, UpdateSeqEJson},
-            {id, DocId},
-            {changes, [{[{rev, couch_doc:rev_to_str(RevId)}]}]}
-        ] ++ DelMember}}, Acc),
+        UserAcc1 = maybe_stop(UserFun(start, UserAcc0)),
 
-        NewAcc
-    end, UserAcc1, erlfdb:wait(Future)),
+        UserAcc2 = erlfdb:fold_range(Tx, Start, End, fun({K, V}, UserAccIn) ->
+            {?DB_CHANGES, UpdateSeq} = erlfdb_tuple:unpack(K, DbPrefix),
+            {DocId, Deleted, RevId} = erlfdb_tuple:unpack(V),
 
-    {LastKey, _} = lists:last(erlfdb:wait(Future)),
-    {?DB_CHANGES, LastSeq} = erlfdb_tuple:unpack(LastKey, DbPrefix),
-    LastSeqEJson = fabric2_util:to_hex(erlfdb_tuple:pack({LastSeq})),
+            % This comes back as a versionstamp so we have
+            % to pack it to get a binary.
+            <<51:8, SeqBin:13/binary>> = erlfdb_tuple:pack({UpdateSeq}),
+            SeqHex = fabric2_util:to_hex(SeqBin),
+            put('$last_changes_seq', SeqHex),
 
-    UserFun({stop, LastSeqEJson, 0}, UserAcc2).
+            DelMember = if not Deleted -> []; true ->
+                [{deleted, true}]
+            end,
+
+            maybe_stop(UserFun({change, {[
+                {seq, SeqHex},
+                {id, DocId},
+                {changes, [{[{rev, couch_doc:rev_to_str(RevId)}]}]}
+            ] ++ DelMember}}, UserAccIn))
+        end, UserAcc1, [{reverse, Reverse}]),
+
+        UserFun({stop, get('$last_changes_seq'), null}, UserAcc2)
+    catch throw:{stop, FinalUserAcc} ->
+        {ok, FinalUserAcc}
+    after
+        erase('$last_changes_seq')
+    end.
 
 
 get_changes(#{} = Db, Options) ->
@@ -631,9 +650,16 @@ get_changes(#{} = Db, Options) ->
     {CStart, CEnd} = erlfdb_tuple:range({?DB_CHANGES}, DbPrefix),
     Future = erlfdb:get_range(Tx, CStart, CEnd, Options),
     lists:map(fun({Key, Val}) ->
-        {?DB_CHANGES, Seq} = erlfdb_tuple:unpack(Key, DbPrefix),
-        {fabric2_util:to_hex(Seq), Val}
+        {?DB_CHANGES, SeqVS} = erlfdb_tuple:unpack(Key, DbPrefix),
+        <<51:8, SeqBin:13/binary>> = erlfdb_tuple:pack({SeqVS}),
+        {fabric2_util:to_hex(SeqBin), Val}
     end, erlfdb:wait(Future)).
+
+
+maybe_stop({ok, Acc}) ->
+    Acc;
+maybe_stop({stop, Acc}) ->
+    throw({stop, Acc}).
 
 
 debug_cluster() ->
@@ -673,20 +699,21 @@ bump_metadata_version(Tx) ->
     erlfdb:set_versionstamped_value(Tx, ?METADATA_VERSION_KEY, <<0:112>>).
 
 
-revinfo_to_fdb(DbPrefix, DocId, #{winner := true} = RevId) ->
+revinfo_to_fdb(Tx, DbPrefix, DocId, #{winner := true} = RevId) ->
     #{
         deleted := Deleted,
         rev_id := {RevPos, Rev},
         rev_path := RevPath,
         branch_count := BranchCount
     } = RevId,
+    VS = new_versionstamp(Tx),
     Key = {?DB_REVS, DocId, not Deleted, RevPos, Rev},
-    Val = {?CURR_REV_FORMAT, ?UNSET_VS, BranchCount, list_to_tuple(RevPath)},
+    Val = {?CURR_REV_FORMAT, VS, BranchCount, list_to_tuple(RevPath)},
     KBin = erlfdb_tuple:pack(Key, DbPrefix),
     VBin = erlfdb_tuple:pack_vs(Val),
-    {KBin, VBin};
+    {KBin, VBin, VS};
 
-revinfo_to_fdb(DbPrefix, DocId, #{} = RevId) ->
+revinfo_to_fdb(_Tx, DbPrefix, DocId, #{} = RevId) ->
     #{
         deleted := Deleted,
         rev_id := {RevPos, Rev},
@@ -696,7 +723,7 @@ revinfo_to_fdb(DbPrefix, DocId, #{} = RevId) ->
     Val = {?CURR_REV_FORMAT, list_to_tuple(RevPath)},
     KBin = erlfdb_tuple:pack(Key, DbPrefix),
     VBin = erlfdb_tuple:pack(Val),
-    {KBin, VBin}.
+    {KBin, VBin, undefined}.
 
 
 fdb_to_revinfo(Key, {?CURR_REV_FORMAT, _, _, _} = Val) ->
@@ -788,6 +815,66 @@ fdb_to_local_doc(_Db, _DocId, not_found) ->
     {not_found, missing}.
 
 
+get_dir_and_bounds(DbPrefix, Options) ->
+    Reverse = case fabric2_util:get_value(dir, Options, fwd) of
+        fwd -> false;
+        rev -> true
+    end,
+    StartKey0 = fabric2_util:get_value(start_key, Options),
+    EndKeyGt = fabric2_util:get_value(end_key_gt, Options),
+    EndKey0 = fabric2_util:get_value(end_key, Options, EndKeyGt),
+    InclusiveEnd = EndKeyGt == undefined,
+
+    % CouchDB swaps the key meanings based on the direction
+    % of the fold. FoundationDB does not so we have to
+    % swap back here.
+    {StartKey1, EndKey1} = case Reverse of
+        false -> {StartKey0, EndKey0};
+        true -> {EndKey0, StartKey0}
+    end,
+
+    % Set the maximum bounds for the start and endkey
+    StartKey2 = case StartKey1 of
+        undefined -> {?DB_ALL_DOCS};
+        SK2 when is_binary(SK2) -> {?DB_ALL_DOCS, SK2}
+    end,
+
+    EndKey2 = case EndKey1 of
+        undefined -> {?DB_ALL_DOCS, <<16#FF>>};
+        EK2 when is_binary(EK2) -> {?DB_ALL_DOCS, EK2}
+    end,
+
+    StartKey3 = erlfdb_tuple:pack(StartKey2, DbPrefix),
+    EndKey3 = erlfdb_tuple:pack(EndKey2, DbPrefix),
+
+    % FoundationDB ranges are applied as SK <= key < EK
+    % By default, CouchDB is SK <= key <= EK with the
+    % optional inclusive_end=false option changing that
+    % to SK <= key < EK. Also, remember that CouchDB
+    % swaps the meaning of SK and EK based on direction.
+    %
+    % Thus we have this wonderful bit of logic to account
+    % for all of those combinations.
+
+    StartKey4 = case {Reverse, InclusiveEnd} of
+        {true, false} ->
+            erlfdb_key:first_greater_than(StartKey3);
+        _ ->
+            StartKey3
+    end,
+
+    EndKey4 = case {Reverse, InclusiveEnd} of
+        {false, true} when EndKey0 /= undefined ->
+            erlfdb_key:first_greater_than(EndKey3);
+        {true, _} ->
+            erlfdb_key:first_greater_than(EndKey3);
+        _ ->
+            EndKey3
+    end,
+
+    {Reverse, StartKey4, EndKey4}.
+
+
 get_db_handle() ->
     case get(?PDICT_DB_KEY) of
         undefined ->
@@ -843,8 +930,8 @@ execute_transaction(Tx, Fun) ->
 
 clear_transaction() ->
     fabric2_txids:remove(get(?PDICT_TX_ID_KEY)),
-    put(?PDICT_TX_ID_KEY, undefined),
-    put(?PDICT_TX_RES_KEY, undefined).
+    erase(?PDICT_TX_ID_KEY),
+    erase(?PDICT_TX_RES_KEY).
 
 
 is_commit_unknown_result() ->
@@ -868,3 +955,14 @@ get_transaction_id(Tx) ->
         TxId when is_binary(TxId) ->
             TxId
     end.
+
+
+new_versionstamp(_Tx) ->
+    % Eventually we'll have a erlfdb:get_next_tx_id(Tx)
+    % that will return a monotonically incrementing
+    % integer. For now we just hardcode 0 since we're
+    % not doing multiple docs per batch.
+    % Various utility macros
+    TxId = 0,
+    {versionstamp, 16#FFFFFFFFFFFFFFFF, 16#FFFF, TxId}.
+
