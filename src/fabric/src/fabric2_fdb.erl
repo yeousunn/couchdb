@@ -45,8 +45,7 @@
 
     fold_docs/4,
     fold_changes/5,
-
-    get_changes/2,
+    get_last_change/1,
 
     debug_cluster/0,
     debug_cluster/2
@@ -251,7 +250,7 @@ get_info(#{} = Db) ->
             fabric2_util:seq_zero();
         [{SeqKey, _}] ->
             {?DB_CHANGES, SeqVS} = erlfdb_tuple:unpack(SeqKey, DbPrefix),
-            <<51:8, SeqBin:13/binary>> = erlfdb_tuple:pack({SeqVS}),
+            <<51:8, SeqBin:12/binary>> = erlfdb_tuple:pack({SeqVS}),
             SeqBin
     end,
     CProp = {update_seq, fabric2_util:to_hex(RawSeq)},
@@ -589,8 +588,7 @@ fold_changes(#{} = Db, SinceSeq0, UserFun, UserAcc0, Options) ->
         db_prefix := DbPrefix
     } = ensure_current(Db),
 
-    SinceSeq1 = fabric2_util:from_hex(SinceSeq0),
-    SinceSeq2 = <<51:8, SinceSeq1/binary>>,
+    SinceSeq1 = get_since_seq(SinceSeq0),
 
     Reverse = case fabric2_util:get_value(dir, Options, fwd) of
         fwd -> false;
@@ -598,17 +596,22 @@ fold_changes(#{} = Db, SinceSeq0, UserFun, UserAcc0, Options) ->
     end,
 
     {Start0, End0} = case Reverse of
-        false ->
-            {{?DB_CHANGES, SinceSeq2}, {?DB_CHANGES, <<16#FF>>}};
-        true ->
-            {{?DB_CHANGES}, {?DB_CHANGES, SinceSeq2}}
+        false -> {SinceSeq1, fabric2_util:seq_max_vs()};
+        true -> {fabric2_util:seq_zero_vs(), SinceSeq1}
     end,
 
-    Start = erlfdb_tuple:pack(Start0, DbPrefix),
-    End = erlfdb_tuple:pack(End0, DbPrefix),
+    Start1 = erlfdb_tuple:pack({?DB_CHANGES, Start0}, DbPrefix),
+    End1 = erlfdb_tuple:pack({?DB_CHANGES, End0}, DbPrefix),
+
+    {Start, End} = case Reverse of
+        false -> {erlfdb_key:first_greater_than(Start1), End1};
+        true -> {Start1, erlfdb_key:first_greater_than(End1)}
+    end,
 
     try
-        put('$last_changes_seq', SinceSeq0),
+        % We have to track this to return last_seq
+        <<51:8, FirstSeq:12/binary>> = erlfdb_tuple:pack({SinceSeq1}),
+        put('$last_changes_seq', fabric2_util:to_hex(FirstSeq)),
 
         UserAcc1 = maybe_stop(UserFun(start, UserAcc0)),
 
@@ -618,7 +621,7 @@ fold_changes(#{} = Db, SinceSeq0, UserFun, UserAcc0, Options) ->
 
             % This comes back as a versionstamp so we have
             % to pack it to get a binary.
-            <<51:8, SeqBin:13/binary>> = erlfdb_tuple:pack({UpdateSeq}),
+            <<51:8, SeqBin:12/binary>> = erlfdb_tuple:pack({UpdateSeq}),
             SeqHex = fabric2_util:to_hex(SeqBin),
             put('$last_changes_seq', SeqHex),
 
@@ -641,19 +644,22 @@ fold_changes(#{} = Db, SinceSeq0, UserFun, UserAcc0, Options) ->
     end.
 
 
-get_changes(#{} = Db, Options) ->
+get_last_change(#{} = Db) ->
     #{
         tx := Tx,
         db_prefix := DbPrefix
     } = ensure_current(Db),
 
-    {CStart, CEnd} = erlfdb_tuple:range({?DB_CHANGES}, DbPrefix),
-    Future = erlfdb:get_range(Tx, CStart, CEnd, Options),
-    lists:map(fun({Key, Val}) ->
-        {?DB_CHANGES, SeqVS} = erlfdb_tuple:unpack(Key, DbPrefix),
-        <<51:8, SeqBin:13/binary>> = erlfdb_tuple:pack({SeqVS}),
-        {fabric2_util:to_hex(SeqBin), Val}
-    end, erlfdb:wait(Future)).
+    {Start, End} = erlfdb_tuple:range({?DB_CHANGES}, DbPrefix),
+    Options = [{limit, 1}, {reverse, true}],
+    case erlfdb:get_range(Tx, Start, End, Options) of
+        [] ->
+            fabric2_util:to_hex(fabric2_util:seq_zero());
+        [{K, _V}] ->
+            {?DB_CHANGES, SeqVS} = erlfdb_tuple:unpack(K, DbPrefix),
+            <<51:8, SeqBin:12/binary>> = erlfdb_tuple:pack({SeqVS}),
+            fabric2_util:to_hex(SeqBin)
+    end.
 
 
 maybe_stop({ok, Acc}) ->
@@ -875,6 +881,20 @@ get_dir_and_bounds(DbPrefix, Options) ->
     {Reverse, StartKey4, EndKey4}.
 
 
+get_since_seq(Seq) when Seq == 0; Seq == <<"0">> ->
+    fabric2_util:seq_zero_vs();
+
+get_since_seq(Seq) when Seq == now; Seq == <<"now">> ->
+    fabric2_util:seq_max_vs();
+
+get_since_seq(Seq) when is_binary(Seq), size(Seq) == 24 ->
+    Seq1 = fabric2_util:from_hex(Seq),
+    Seq2 = <<51:8, Seq1/binary>>,
+    {SeqVS} = erlfdb_tuple:unpack(Seq2),
+    SeqVS.
+
+
+
 get_db_handle() ->
     case get(?PDICT_DB_KEY) of
         undefined ->
@@ -960,9 +980,8 @@ get_transaction_id(Tx) ->
 new_versionstamp(_Tx) ->
     % Eventually we'll have a erlfdb:get_next_tx_id(Tx)
     % that will return a monotonically incrementing
-    % integer. For now we just hardcode 0 since we're
-    % not doing multiple docs per batch.
-    % Various utility macros
+    % integer from 0 to 65535. For now we just hardcode
+    % 0 since we're not doing multiple docs per batch.
     TxId = 0,
     {versionstamp, 16#FFFFFFFFFFFFFFFF, 16#FFFF, TxId}.
 

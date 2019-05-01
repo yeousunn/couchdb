@@ -16,7 +16,10 @@
 -export([
     revinfo_to_path/1,
     sort_revinfos/1,
+
     seq_zero/0,
+    seq_zero_vs/0,
+    seq_max_vs/0,
 
     user_ctx_to_json/1,
 
@@ -65,6 +68,14 @@ rev_sort_key(#{} = RevInfo) ->
 
 seq_zero() ->
     <<0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0>>.
+
+
+seq_zero_vs() ->
+    {versionstamp, 0, 0, 0}.
+
+
+seq_max_vs() ->
+    {versionstamp, 18446744073709551615, 65535, 65535}.
 
 
 user_ctx_to_json(Db) ->

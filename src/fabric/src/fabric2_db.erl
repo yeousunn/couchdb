@@ -307,11 +307,7 @@ get_security(#{security_doc := SecurityDoc}) ->
 
 get_update_seq(#{} = Db) ->
     fabric2_fdb:transactional(Db, fun(TxDb) ->
-        Opts = [{limit, 1}, {reverse, true}],
-        case fabric2_fdb:get_changes(TxDb, Opts) of
-            [] -> fabric2_util:to_hex(fabric2_util:seq_zero());
-            [{Seq, _}] -> Seq
-        end
+        fabric2_fdb:get_last_change(TxDb)
     end).
 
 
