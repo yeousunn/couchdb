@@ -80,7 +80,10 @@ do_transaction(Fun, LayerPrefix) when is_function(Fun, 1) ->
     Db = get_db_handle(),
     try
         erlfdb:transactional(Db, fun(Tx) ->
-            erlfdb:set_option(Tx, transaction_logging_enable),
+            case get('erlfdb_trace') of
+                true -> erlfdb:set_option(Tx, transaction_logging_enable);
+                _ -> ok
+            end,
             case is_transaction_applied(Tx) of
                 true ->
                     get_previous_transaction_result();
@@ -567,7 +570,7 @@ fold_docs(#{} = Db, UserFun, UserAcc0, Options) ->
     DocCountBin = erlfdb:wait(erlfdb:get(Tx, DocCountKey)),
 
     try
-        UserAcc1 = maybe_stop(UserFun({meta, [
+        UserAcc1 = maybe_stop(UserFun(Db, {meta, [
             {total, ?bin2uint(DocCountBin)},
             {offset, null}
         ]}, UserAcc0)),
@@ -575,14 +578,14 @@ fold_docs(#{} = Db, UserFun, UserAcc0, Options) ->
         UserAcc2 = erlfdb:fold_range(Tx, Start, End, fun({K, V}, UserAccIn) ->
             {?DB_ALL_DOCS, DocId} = erlfdb_tuple:unpack(K, DbPrefix),
             RevId = erlfdb_tuple:unpack(V),
-            maybe_stop(UserFun({row, [
+            maybe_stop(UserFun(Db, {row, [
                 {id, DocId},
                 {key, DocId},
                 {value, couch_doc:rev_to_str(RevId)}
             ]}, UserAccIn))
         end, UserAcc1, [{reverse, Reverse}]),
 
-        {ok, maybe_stop(UserFun(complete, UserAcc2))}
+        {ok, maybe_stop(UserFun(Db, complete, UserAcc2))}
     catch throw:{stop, FinalUserAcc} ->
         {ok, FinalUserAcc}
     end.
@@ -619,7 +622,7 @@ fold_changes(#{} = Db, SinceSeq0, UserFun, UserAcc0, Options) ->
         <<51:8, FirstSeq:12/binary>> = erlfdb_tuple:pack({SinceSeq1}),
         put('$last_changes_seq', fabric2_util:to_hex(FirstSeq)),
 
-        UserAcc1 = maybe_stop(UserFun(start, UserAcc0)),
+        UserAcc1 = maybe_stop(UserFun(Db, start, UserAcc0)),
 
         UserAcc2 = erlfdb:fold_range(Tx, Start, End, fun({K, V}, UserAccIn) ->
             {?DB_CHANGES, UpdateSeq} = erlfdb_tuple:unpack(K, DbPrefix),
@@ -635,14 +638,14 @@ fold_changes(#{} = Db, SinceSeq0, UserFun, UserAcc0, Options) ->
                 [{deleted, true}]
             end,
 
-            maybe_stop(UserFun({change, {[
+            maybe_stop(UserFun(Db, {change, {[
                 {seq, SeqHex},
                 {id, DocId},
                 {changes, [{[{rev, couch_doc:rev_to_str(RevId)}]}]}
             ] ++ DelMember}}, UserAccIn))
         end, UserAcc1, [{reverse, Reverse}]),
 
-        UserFun({stop, get('$last_changes_seq'), null}, UserAcc2)
+        UserFun(Db, {stop, get('$last_changes_seq'), null}, UserAcc2)
     catch throw:{stop, FinalUserAcc} ->
         {ok, FinalUserAcc}
     after

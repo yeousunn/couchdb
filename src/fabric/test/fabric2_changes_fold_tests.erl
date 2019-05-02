@@ -67,12 +67,12 @@ cleanup({Db, _DocIdRevs, Ctx}) ->
 
 
 fold_changes_basic({Db, DocRows, _}) ->
-    {ok, Rows} = fabric2_db:fold_changes(Db, 0, fun fold_fun/2, []),
+    {ok, Rows} = fabric2_db:fold_changes(Db, 0, fun fold_fun/3, []),
     ?assertEqual(lists:reverse(DocRows), Rows).
 
 
 fold_changes_since_now({Db, _, _}) ->
-    {ok, Rows} = fabric2_db:fold_changes(Db, now, fun fold_fun/2, []),
+    {ok, Rows} = fabric2_db:fold_changes(Db, now, fun fold_fun/3, []),
     ?assertEqual([], Rows).
 
 
@@ -81,20 +81,20 @@ fold_changes_since_seq({_, [], _}) ->
 
 fold_changes_since_seq({Db, [Row | RestRows], _}) ->
     #{seq := Since} = Row,
-    {ok, Rows} = fabric2_db:fold_changes(Db, Since, fun fold_fun/2, []),
+    {ok, Rows} = fabric2_db:fold_changes(Db, Since, fun fold_fun/3, []),
     ?assertEqual(lists:reverse(RestRows), Rows),
     fold_changes_since_seq({Db, RestRows, nil}).
 
 
 fold_changes_basic_rev({Db, _, _}) ->
     Opts = [{dir, rev}],
-    {ok, Rows} = fabric2_db:fold_changes(Db, 0, fun fold_fun/2, [], Opts),
+    {ok, Rows} = fabric2_db:fold_changes(Db, 0, fun fold_fun/3, [], Opts),
     ?assertEqual([], Rows).
 
 
 fold_changes_since_now_rev({Db, DocRows, _}) ->
     Opts = [{dir, rev}],
-    {ok, Rows} = fabric2_db:fold_changes(Db, now, fun fold_fun/2, [], Opts),
+    {ok, Rows} = fabric2_db:fold_changes(Db, now, fun fold_fun/3, [], Opts),
     ?assertEqual(DocRows, Rows).
 
 
@@ -104,15 +104,15 @@ fold_changes_since_seq_rev({_, [], _}) ->
 fold_changes_since_seq_rev({Db, DocRows, _}) ->
     #{seq := Since} = lists:last(DocRows),
     Opts = [{dir, rev}],
-    {ok, Rows} = fabric2_db:fold_changes(Db, Since, fun fold_fun/2, [], Opts),
+    {ok, Rows} = fabric2_db:fold_changes(Db, Since, fun fold_fun/3, [], Opts),
     ?assertEqual(DocRows, Rows),
     RestRows = lists:sublist(DocRows, length(DocRows) - 1),
     fold_changes_since_seq_rev({Db, RestRows, nil}).
 
 
-fold_fun(start, Acc) ->
+fold_fun(_Db, start, Acc) ->
     {ok, Acc};
-fold_fun({change, {Props}}, Acc) ->
+fold_fun(_Db, {change, {Props}}, Acc) ->
     [{[{rev, Rev}]}] = fabric2_util:get_value(changes, Props),
     Row = #{
         id => fabric2_util:get_value(id, Props),
@@ -121,5 +121,5 @@ fold_fun({change, {Props}}, Acc) ->
         rev => Rev
     },
     {ok, [Row | Acc]};
-fold_fun({stop, _LastSeq, null}, Acc) ->
+fold_fun(_Db, {stop, _LastSeq, null}, Acc) ->
     {ok, Acc}.

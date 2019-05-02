@@ -100,7 +100,7 @@ run_on_first_try() ->
     meck:expect(erlfdb, get_last_error, fun() -> undefined end),
     meck:expect(erlfdb, clear, fun(_, _) -> ok end),
     meck:expect(erlfdb, is_read_only, fun(_) -> false end),
-    meck:expect(fabric2_txids, create, fun(_) -> <<"a txid">> end),
+    meck:expect(fabric2_txids, create, fun(_, _) -> <<"a txid">> end),
     meck:expect(erlfdb, set, fun(_, <<"a txid">>, <<>>) -> ok end),
     meck:expect(fabric2_txids, remove, fun(<<"a txid">>) -> ok end),
 
@@ -120,7 +120,7 @@ retry_when_commit_conflict() ->
     meck:expect(erlfdb, get_last_error, fun() -> 1020 end),
     meck:expect(erlfdb, clear, fun(_, _) -> ok end),
     meck:expect(erlfdb, is_read_only, fun(_) -> false end),
-    meck:expect(fabric2_txids, create, fun(_) -> <<"a txid">> end),
+    meck:expect(fabric2_txids, create, fun(_, _) -> <<"a txid">> end),
     meck:expect(erlfdb, set, fun(_, <<"a txid">>, <<>>) -> ok end),
     meck:expect(fabric2_txids, remove, fun(<<"a txid">>) -> ok end),
 

@@ -46,6 +46,7 @@ cleanup({Db, Ctx}) ->
 
 
 create_new_doc({Db, _}) ->
+    put(erlfdb_trace, true),
     Doc = #doc{
         id = fabric2_util:uuid(),
         body = {[{<<"foo">>, <<"bar">>}]}
@@ -54,6 +55,7 @@ create_new_doc({Db, _}) ->
 
 
 create_two_docs({Db, _}) ->
+    put(erlfdb_trace, true),
     Doc1 = #doc{
         id = fabric2_util:uuid(),
         body = {[{<<"bam">>, <<"baz">>}]}
@@ -66,6 +68,7 @@ create_two_docs({Db, _}) ->
 
 
 create_50_docs({Db, _}) ->
+    put(erlfdb_trace, true),
     Docs = lists:map(fun(Val) ->
         #doc{
             id = fabric2_util:uuid(),
