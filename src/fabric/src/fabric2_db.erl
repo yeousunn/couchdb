@@ -153,7 +153,7 @@ create(DbName, Options) ->
     case Result of
         #{} = Db ->
             ok = fabric2_server:store(Db),
-            {ok, Db#{tx => undefined}};
+            {ok, Db#{tx := undefined}};
         Error ->
             Error
     end.
@@ -164,11 +164,17 @@ open(DbName, Options) ->
         #{} = Db ->
             {ok, maybe_set_user_ctx(Db, Options)};
         undefined ->
-            fabric2_fdb:transactional(DbName, Options, fun(TxDb) ->
-                Opened = fabric2_fdb:open(TxDb, Options),
-                ok = fabric2_server:store(Opened),
-                {ok, Opened#{tx => undefined}}
-            end)
+            Result = fabric2_fdb:transactional(DbName, Options, fun(TxDb) ->
+                fabric2_fdb:open(TxDb, Options)
+            end),
+            % Cache outside the transaction retry loop
+            case Result of
+                #{} = Db ->
+                    ok = fabric2_server:store(Db),
+                    {ok, Db#{tx := undefined}};
+                Error ->
+                    Error
+            end
     end.
 
 

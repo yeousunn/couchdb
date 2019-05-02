@@ -17,7 +17,7 @@
 
 -export([
     start_link/0,
-    create/1,
+    create/2,
     remove/1
 ]).
 
@@ -43,13 +43,16 @@ start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 
-create(Tx) ->
+create(Tx, undefined) ->
     Root = erlfdb_directory:root(),
     CouchDB = erlfdb_directory:create_or_open(Tx, Root, [<<"couchdb">>]),
     Prefix = erlfdb_directory:get_name(CouchDB),
+    create(Tx, Prefix);
+
+create(_Tx, LayerPrefix) ->
     {Mega, Secs, Micro} = os:timestamp(),
     Key = {?TX_IDS, Mega, Secs, Micro, fabric2_util:uuid()},
-    erlfdb_tuple:pack(Key, Prefix).
+    erlfdb_tuple:pack(Key, LayerPrefix).
 
 
 remove(TxId) when is_binary(TxId) ->

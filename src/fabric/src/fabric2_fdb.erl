@@ -56,20 +56,8 @@
 -include("fabric2.hrl").
 
 
-transactional(Fun) when is_function(Fun, 1) ->
-    Db = get_db_handle(),
-    try
-        erlfdb:transactional(Db, fun(Tx) ->
-            case is_transaction_applied(Tx) of
-                true ->
-                    get_previous_transaction_result();
-                false ->
-                    execute_transaction(Tx, Fun)
-            end
-        end)
-    after
-        clear_transaction()
-    end.
+transactional(Fun) ->
+    do_transaction(Fun, undefined).
 
 
 transactional(DbName, Options, Fun) when is_binary(DbName) ->
@@ -79,12 +67,30 @@ transactional(DbName, Options, Fun) when is_binary(DbName) ->
 
 
 transactional(#{tx := undefined} = Db, Fun) ->
-    transactional(fun(Tx) ->
+    #{layer_prefix := LayerPrefix} = Db,
+    do_transaction(fun(Tx) ->
         Fun(Db#{tx => Tx})
-    end);
+    end, LayerPrefix);
 
 transactional(#{tx := {erlfdb_transaction, _}} = Db, Fun) ->
     Fun(Db).
+
+
+do_transaction(Fun, LayerPrefix) when is_function(Fun, 1) ->
+    Db = get_db_handle(),
+    try
+        erlfdb:transactional(Db, fun(Tx) ->
+            erlfdb:set_option(Tx, transaction_logging_enable),
+            case is_transaction_applied(Tx) of
+                true ->
+                    get_previous_transaction_result();
+                false ->
+                    execute_transaction(Tx, Fun, LayerPrefix)
+            end
+        end)
+    after
+        clear_transaction()
+    end.
 
 
 create(#{} = Db0, Options) ->
@@ -936,13 +942,13 @@ get_previous_transaction_result() ->
     get(?PDICT_TX_RES_KEY).
 
 
-execute_transaction(Tx, Fun) ->
+execute_transaction(Tx, Fun, LayerPrefix) ->
     Result = Fun(Tx),
     case erlfdb:is_read_only(Tx) of
         true ->
             ok;
         false ->
-            erlfdb:set(Tx, get_transaction_id(Tx), <<>>),
+            erlfdb:set(Tx, get_transaction_id(Tx, LayerPrefix), <<>>),
             put(?PDICT_TX_RES_KEY, Result)
     end,
     Result.
@@ -966,10 +972,10 @@ transaction_id_exists(Tx) ->
     erlfdb:wait(erlfdb:get(Tx, get(?PDICT_TX_ID_KEY))) == <<>>.
 
 
-get_transaction_id(Tx) ->
+get_transaction_id(Tx, LayerPrefix) ->
     case get(?PDICT_TX_ID_KEY) of
         undefined ->
-            TxId = fabric2_txids:create(Tx),
+            TxId = fabric2_txids:create(Tx, LayerPrefix),
             put(?PDICT_TX_ID_KEY, TxId),
             TxId;
         TxId when is_binary(TxId) ->
