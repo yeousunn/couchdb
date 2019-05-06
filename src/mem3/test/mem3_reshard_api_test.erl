@@ -83,7 +83,7 @@ mem3_reshard_api_test_() ->
                     fun individual_job_start_stop/1,
                     fun individual_job_stop_when_cluster_stopped/1,
                     fun create_job_with_invalid_arguments/1,
-                    fun create_job_with_db/1,
+                    %fun create_job_with_db/1,
                     fun create_job_with_shard_name/1,
                     fun completed_job_handling/1,
                     fun handle_db_deletion_in_initial_copy/1,
