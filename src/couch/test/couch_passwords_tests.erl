@@ -44,11 +44,11 @@ pbkdf2_test_()->
               {ok, <<"56fa6aa75548099dcc37d7f03425e0c3">>},
               couch_passwords:pbkdf2(<<"pass\0word">>,
                                      <<"sa\0lt">>,
-                                     4096, 16))},
+                                     4096, 16))}]}.
 
-         {timeout, 180,  %% this may runs too long on slow hosts
-          {"Iterations: 16777216 - this may take some time",
-           ?_assertEqual(
-               {ok, <<"eefe3d61cd4da4e4e9945b3d6ba2158c2634e984">>},
-               couch_passwords:pbkdf2(<<"password">>, <<"salt">>, 16777216, 20)
-           )}}]}.
+         %{timeout, 180,  %% this may runs too long on slow hosts
+         % {"Iterations: 16777216 - this may take some time",
+         %  ?_assertEqual(
+         %      {ok, <<"eefe3d61cd4da4e4e9945b3d6ba2158c2634e984">>},
+         %      couch_passwords:pbkdf2(<<"password">>, <<"salt">>, 16777216, 20)
+         %  )}}]}.
