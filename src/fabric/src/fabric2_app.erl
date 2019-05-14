@@ -25,4 +25,8 @@ start(_Type, StartArgs) ->
 
 
 stop(_State) ->
+    case application:get_env(erlfdb, test_cluster_pid) of
+        {ok, Pid} -> Pid ! close;
+        _ -> ok
+    end,
     ok.
