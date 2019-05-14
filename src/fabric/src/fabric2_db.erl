@@ -479,21 +479,28 @@ update_docs(Db, Docs) ->
 
 
 update_docs(Db, Docs, Options) ->
-    {Resps0, Status} = lists:mapfoldl(fun(Doc, Acc) ->
-        fabric2_fdb:transactional(Db, fun(TxDb) ->
-            case update_doc_int(TxDb, Doc, Options) of
-                {ok, _} = Resp ->
-                    {Resp, Acc};
-                Resp ->
-                    {Resp, error}
-            end
-        end)
-    end, ok, Docs),
+    Resps0 = case lists:member(replicated_changes, Options) of
+        false ->
+            fabric2_fdb:transactional(Db, fun(TxDb) ->
+                update_docs_interactive(TxDb, Docs, Options)
+            end);
+        true ->
+            lists:map(fun(Doc) ->
+                fabric2_fdb:transactional(Db, fun(TxDb) ->
+                    update_doc_int(TxDb, Doc, Options)
+                end)
+            end)
+    end,
+    Status = lists:foldl(fun(Resp, Acc) ->
+        case Resp of
+            {ok, _} -> Acc;
+            _ -> error
+        end
+    end, ok, Resps0),
     Resps1 = case lists:member(replicated_changes, Options) of
         true -> [R || R <- Resps0, R /= {ok, []}];
         false -> Resps0
     end,
-    %io:format(standard_error, "~nRESPS: ~p :: ~p~n~n", [Resps0, Resps1]),
     {Status, Resps1}.
 
 
@@ -659,14 +666,58 @@ update_doc_int(#{} = Db, #doc{} = Doc, Options) ->
     end.
 
 
-update_doc_interactive(Db, Doc0, _Options) ->
+update_docs_interactive(Db, Docs0, Options) ->
+    Docs = tag_docs(Docs0),
+    Futures = lists:foldl(fun(Doc, Acc) ->
+        #doc{
+            id = DocId,
+            deleted = Deleted
+        } = Doc,
+        case DocId of
+            <<?LOCAL_DOC_PREFIX, _/binary>> ->
+                Acc;
+            _ ->
+                NumRevs = if Deleted -> 2; true -> 1 end,
+                Future = fabric2_fdb:get_winning_revs_future(Db, DocId, NumRevs),
+                DocTag = doc_tag(Doc),
+                Acc#{DocTag => Future}
+        end
+    end, #{}, Docs),
+    {Result, _} = lists:mapfoldl(fun(#doc{id = DocId} = Doc, Acc) ->
+        case DocId of
+            <<?LOCAL_DOC_PREFIX, _/binary>> ->
+                {update_local_doc(Db, Doc, Options), Acc};
+            _ ->
+                case lists:member(DocId, Acc) of
+                    false ->
+                        Future = maps:get(doc_tag(Doc), Futures),
+                        case update_doc_interactive(Db, Doc, Future, Options) of
+                            {ok, _} = Resp ->
+                                {Resp, [DocId | Acc]};
+                            _ = Resp ->
+                                {Resp, Acc}
+                        end;
+                    true ->
+                        {{error, conflict}, Acc}
+                end
+        end
+    end, [], Docs),
+    Result.
+
+
+update_doc_interactive(Db, Doc0, Options) ->
     % Get the current winning revision. This is needed
     % regardless of which branch we're updating. The extra
     % revision we're grabbing is an optimization to
     % save us a round trip if we end up deleting
     % the winning revision branch.
     NumRevs = if Doc0#doc.deleted -> 2; true -> 1 end,
-    RevInfos = fabric2_fdb:get_winning_revs(Db, Doc0#doc.id, NumRevs),
+    Future = fabric2_fdb:get_winning_revs_future(Db, Doc0#doc.id, NumRevs),
+    update_doc_interactive(Db, Doc0, Future, Options).
+
+
+update_doc_interactive(Db, Doc0, Future, _Options) ->
+    RevInfos = fabric2_fdb:get_winning_revs_wait(Db, Future),
     {Winner, SecondPlace} = case RevInfos of
         [] -> {not_found, not_found};
         [WRI] -> {WRI, not_found};
@@ -980,3 +1031,16 @@ doc_to_revid(#doc{revs = Revs}) ->
         {0, []} -> {0, <<>>};
         {RevPos, [Rev | _]} -> {RevPos, Rev}
     end.
+
+
+tag_docs([]) ->
+    [];
+tag_docs([#doc{meta = Meta} = Doc | Rest]) ->
+    NewDoc = Doc#doc{
+        meta = [{ref, make_ref()} | Meta]
+    },
+    [NewDoc | tag_docs(Rest)].
+
+
+doc_tag(#doc{meta = Meta}) ->
+    fabric2_util:get_value(ref, Meta).

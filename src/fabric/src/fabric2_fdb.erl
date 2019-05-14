@@ -35,6 +35,8 @@
 
     get_all_revs/2,
     get_winning_revs/3,
+    get_winning_revs_future/3,
+    get_winning_revs_wait/2,
     get_non_deleted_rev/3,
 
     get_doc_body/3,
@@ -80,9 +82,11 @@ do_transaction(Fun, LayerPrefix) when is_function(Fun, 1) ->
     Db = get_db_handle(),
     try
         erlfdb:transactional(Db, fun(Tx) ->
-            case get('erlfdb_trace') of
-                true -> erlfdb:set_option(Tx, transaction_logging_enable);
-                _ -> ok
+            case get(erlfdb_trace) of
+                Name when is_binary(Name) ->
+                    erlfdb:set_option(Tx, transaction_logging_enable, Name);
+                _ ->
+                    ok
             end,
             case is_transaction_applied(Tx) of
                 true ->
@@ -357,7 +361,12 @@ get_all_revs(#{} = Db, DocId) ->
     end, erlfdb:wait(Future)).
 
 
-get_winning_revs(#{} = Db, DocId, NumRevs) ->
+get_winning_revs(Db, DocId, NumRevs) ->
+    Future = get_winning_revs_future(Db, DocId, NumRevs),
+    get_winning_revs_wait(Db, Future).
+
+
+get_winning_revs_future(#{} = Db, DocId, NumRevs) ->
     #{
         tx := Tx,
         db_prefix := DbPrefix
@@ -365,12 +374,19 @@ get_winning_revs(#{} = Db, DocId, NumRevs) ->
 
     {StartKey, EndKey} = erlfdb_tuple:range({?DB_REVS, DocId}, DbPrefix),
     Options = [{reverse, true}, {limit, NumRevs}],
-    Future = erlfdb:get_range(Tx, StartKey, EndKey, Options),
+    erlfdb:get_range_raw(Tx, StartKey, EndKey, Options).
+
+
+get_winning_revs_wait(#{} = Db, Future) ->
+    #{
+        db_prefix := DbPrefix
+    } = ensure_current(Db),
+    {Rows, _, false} = erlfdb:wait(Future),
     lists:map(fun({K, V}) ->
         Key = erlfdb_tuple:unpack(K, DbPrefix),
         Val = erlfdb_tuple:unpack(V),
         fdb_to_revinfo(Key, Val)
-    end, erlfdb:wait(Future)).
+    end, Rows).
 
 
 get_non_deleted_rev(#{} = Db, DocId, RevId) ->
@@ -903,7 +919,6 @@ get_since_seq(Seq) when is_binary(Seq), size(Seq) == 24 ->
     SeqVS.
 
 
-
 get_db_handle() ->
     case get(?PDICT_DB_KEY) of
         undefined ->
@@ -986,11 +1001,7 @@ get_transaction_id(Tx, LayerPrefix) ->
     end.
 
 
-new_versionstamp(_Tx) ->
-    % Eventually we'll have a erlfdb:get_next_tx_id(Tx)
-    % that will return a monotonically incrementing
-    % integer from 0 to 65535. For now we just hardcode
-    % 0 since we're not doing multiple docs per batch.
-    TxId = 0,
+new_versionstamp(Tx) ->
+    TxId = erlfdb:get_next_tx_id(Tx),
     {versionstamp, 16#FFFFFFFFFFFFFFFF, 16#FFFF, TxId}.
 
