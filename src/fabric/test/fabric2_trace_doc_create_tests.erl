@@ -46,7 +46,7 @@ cleanup({Db, Ctx}) ->
 
 
 create_new_doc({Db, _}) ->
-    put(erlfdb_trace, true),
+    put(erlfdb_trace, <<"one doc">>),
     Doc = #doc{
         id = fabric2_util:uuid(),
         body = {[{<<"foo">>, <<"bar">>}]}
@@ -55,7 +55,7 @@ create_new_doc({Db, _}) ->
 
 
 create_two_docs({Db, _}) ->
-    put(erlfdb_trace, true),
+    put(erlfdb_trace, <<"two docs">>),
     Doc1 = #doc{
         id = fabric2_util:uuid(),
         body = {[{<<"bam">>, <<"baz">>}]}
@@ -68,12 +68,19 @@ create_two_docs({Db, _}) ->
 
 
 create_50_docs({Db, _}) ->
-    put(erlfdb_trace, true),
-    Docs = lists:map(fun(Val) ->
-        #doc{
-            id = fabric2_util:uuid(),
-            body = {[{<<"value">>, Val}]}
-        }
-    end, lists:seq(1, 50)),
-    {ok, _} = fabric2_db:update_docs(Db, Docs).
-
+    lists:foreach(fun(_) ->
+        spawn_monitor(fun() ->
+            Name = io_lib:format("50 docs : ~w", [self()]),
+            put(erlfdb_trace, iolist_to_binary(Name)),
+            Docs = lists:map(fun(Val) ->
+                #doc{
+                    id = fabric2_util:uuid(),
+                    body = {[{<<"value">>, Val}]}
+                }
+            end, lists:seq(1, 50)),
+            {ok, _} = fabric2_db:update_docs(Db, Docs)
+        end)
+    end, lists:seq(1, 5)),
+    lists:foreach(fun(_) ->
+        receive {'DOWN', _, _, _, _} -> ok end
+    end, lists:seq(1, 5)).
