@@ -489,7 +489,7 @@ update_docs(Db, Docs, Options) ->
                 fabric2_fdb:transactional(Db, fun(TxDb) ->
                     update_doc_int(TxDb, Doc, Options)
                 end)
-            end)
+            end, Docs)
     end,
     Status = lists:foldl(fun(Resp, Acc) ->
         case Resp of
@@ -648,7 +648,6 @@ get_members(SecProps) ->
     end.
 
 
-% TODO: Handle _local docs separately.
 update_doc_int(#{} = Db, #doc{} = Doc, Options) ->
     IsLocal = case Doc#doc.id of
         <<?LOCAL_DOC_PREFIX, _/binary>> -> true;
@@ -668,41 +667,34 @@ update_doc_int(#{} = Db, #doc{} = Doc, Options) ->
 
 update_docs_interactive(Db, Docs0, Options) ->
     Docs = tag_docs(Docs0),
-    Futures = lists:foldl(fun(Doc, Acc) ->
-        #doc{
-            id = DocId,
-            deleted = Deleted
-        } = Doc,
-        case DocId of
-            <<?LOCAL_DOC_PREFIX, _/binary>> ->
-                Acc;
-            _ ->
-                NumRevs = if Deleted -> 2; true -> 1 end,
-                Future = fabric2_fdb:get_winning_revs_future(Db, DocId, NumRevs),
-                DocTag = doc_tag(Doc),
-                Acc#{DocTag => Future}
-        end
-    end, #{}, Docs),
-    {Result, _} = lists:mapfoldl(fun(#doc{id = DocId} = Doc, Acc) ->
-        case DocId of
-            <<?LOCAL_DOC_PREFIX, _/binary>> ->
-                {update_local_doc(Db, Doc, Options), Acc};
-            _ ->
-                case lists:member(DocId, Acc) of
-                    false ->
-                        Future = maps:get(doc_tag(Doc), Futures),
-                        case update_doc_interactive(Db, Doc, Future, Options) of
-                            {ok, _} = Resp ->
-                                {Resp, [DocId | Acc]};
-                            _ = Resp ->
-                                {Resp, Acc}
-                        end;
-                    true ->
-                        {{error, conflict}, Acc}
-                end
+    Futures = get_winning_rev_futures(Db, Docs),
+    {Result, _} = lists:mapfoldl(fun(Doc, SeenIds) ->
+        try
+            update_docs_interactive(Db, Doc, Options, Futures, SeenIds)
+        catch throw:{?MODULE, Return} ->
+            {Return, SeenIds}
         end
     end, [], Docs),
     Result.
+
+
+update_docs_interactive(Db, #doc{id = <<?LOCAL_DOC_PREFIX, _/binary>>} = Doc,
+        Options, Futures, SeenIds) ->
+    {update_local_doc(Db, Doc, Options), SeenIds};
+
+update_docs_interactive(Db, Doc, Options, Futures, SeenIds) ->
+    case lists:member(Doc#doc.id, SeenIds) of
+        true ->
+            {{error, conflict}, SeenIds};
+        false ->
+            Future = maps:get(doc_tag(Doc), Futures),
+            case update_doc_interactive(Db, Doc, Future, Options) of
+                {ok, _} = Resp ->
+                    {Resp, [Doc#doc.id | SeenIds]};
+                _ = Resp ->
+                    {Resp, SeenIds}
+            end
+    end.
 
 
 update_doc_interactive(Db, Doc0, Options) ->
@@ -923,6 +915,25 @@ update_local_doc(Db, Doc0, _Options) ->
 
     #doc{revs = {0, [Rev]}} = Doc1,
     {ok, {0, integer_to_binary(Rev)}}.
+
+
+get_winning_rev_futures(Db, Docs) ->
+    lists:foldl(fun(Doc, Acc) ->
+        #doc{
+            id = DocId,
+            deleted = Deleted
+        } = Doc,
+        IsLocal = case DocId of
+            <<?LOCAL_DOC_PREFIX, _/binary>> -> true;
+            _ -> false
+        end,
+        if IsLocal -> Acc; true ->
+            NumRevs = if Deleted -> 2; true -> 1 end,
+            Future = fabric2_fdb:get_winning_revs_future(Db, DocId, NumRevs),
+            DocTag = doc_tag(Doc),
+            Acc#{DocTag => Future}
+        end
+    end, #{}, Docs).
 
 
 prep_and_validate(Db, Doc, PrevRevInfo) ->

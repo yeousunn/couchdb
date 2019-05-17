@@ -381,7 +381,7 @@ get_winning_revs_wait(#{} = Db, Future) ->
     #{
         db_prefix := DbPrefix
     } = ensure_current(Db),
-    {Rows, _, false} = erlfdb:wait(Future),
+    {Rows, _, _} = erlfdb:wait(Future),
     lists:map(fun({K, V}) ->
         Key = erlfdb_tuple:unpack(K, DbPrefix),
         Val = erlfdb_tuple:unpack(V),
