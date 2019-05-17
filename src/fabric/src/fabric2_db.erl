@@ -403,16 +403,22 @@ open_doc(#{} = Db, <<?LOCAL_DOC_PREFIX, _/binary>> = DocId, _Options) ->
         end
     end);
 
-open_doc(#{} = Db, DocId, _Options) ->
+open_doc(#{} = Db, DocId, Options) ->
+    NeedsTreeOpts = [revs_info, conflicts, deleted_conflicts],
+    NeedsTree = (Options -- NeedsTreeOpts /= Options),
     fabric2_fdb:transactional(Db, fun(TxDb) ->
-        case fabric2_fdb:get_winning_revs(TxDb, DocId, 1) of
-            [] ->
-                {not_found, missing};
-            [#{winner := true} = RevInfo] ->
-                case fabric2_fdb:get_doc_body(TxDb, DocId, RevInfo) of
-                    #doc{} = Doc -> {ok, Doc};
-                    Else -> Else
-                end
+        Revs = case NeedsTree of
+            true -> fabric2_fdb:get_all_revs(TxDb, DocId);
+            false -> fabric2_fdb:get_winning_revs(TxDb, DocId, 1)
+        end,
+        if Revs == [] -> {not_found, missing}; true ->
+            #{winner := true} = RI = lists:last(Revs),
+            case fabric2_fdb:get_doc_body(TxDb, DocId, RI) of
+                #doc{} = Doc ->
+                    apply_open_doc_opts(Doc, Revs, Options);
+                Else ->
+                    Else
+            end
         end
     end).
 
@@ -648,6 +654,52 @@ get_members(SecProps) ->
     end.
 
 
+apply_open_doc_opts(Doc, Revs, Options) ->
+    IncludeRevsInfo = lists:member(revs_info, Options),
+    IncludeConflicts = lists:member(conflicts, Options),
+    IncludeDelConflicts = lists:member(deleted_conflicts, Options),
+    IncludeLocalSeq = lists:member(local_seq, Options),
+    ReturnDeleted = lists:member(deleted, Options),
+
+    % This revs_info becomes fairly useless now that we're
+    % not keeping old document bodies around...
+    Meta1 = if not IncludeRevsInfo -> []; true ->
+        {Pos, [Rev | RevPath]} = Doc#doc.revs,
+        RevPathMissing = lists:map(fun(R) -> {R, missing} end, RevPath),
+        [{revs_info, Pos, [{Rev, available} | RevPathMissing]}]
+    end,
+
+    Meta2 = if not IncludeConflicts -> []; true ->
+        Conflicts = [RI || RI = #{winner := false, deleted := false} <- Revs],
+        if Conflicts == [] -> []; true ->
+            ConflictRevs = [maps:get(rev_id, RI) || RI <- Conflicts],
+            [{conflicts, ConflictRevs}]
+        end
+    end,
+
+    Meta3 = if not IncludeDelConflicts -> []; true ->
+        DelConflicts = [RI || RI = #{winner := false, deleted := true} <- Revs],
+        if DelConflicts == [] -> []; true ->
+            DelConflictRevs = [maps:get(rev_id, RI) || RI <- DelConflicts],
+            [{deleted_conflicts, DelConflictRevs}]
+        end
+    end,
+
+    Meta4 = if not IncludeLocalSeq -> []; true ->
+        #{winner := true, sequence := Seq} = lists:last(Revs),
+        [{local_seq, erlfdb_tuple:pack({Seq})}]
+    end,
+
+    case Doc#doc.deleted and not ReturnDeleted of
+        true ->
+            {not_found, deleted};
+        false ->
+            {ok, Doc#doc{
+                meta = Meta1 ++ Meta2 ++ Meta3 ++ Meta4
+            }}
+    end.
+
+
 update_doc_int(#{} = Db, #doc{} = Doc, Options) ->
     IsLocal = case Doc#doc.id of
         <<?LOCAL_DOC_PREFIX, _/binary>> -> true;
@@ -679,7 +731,7 @@ update_docs_interactive(Db, Docs0, Options) ->
 
 
 update_docs_interactive(Db, #doc{id = <<?LOCAL_DOC_PREFIX, _/binary>>} = Doc,
-        Options, Futures, SeenIds) ->
+        Options, _Futures, SeenIds) ->
     {update_local_doc(Db, Doc, Options), SeenIds};
 
 update_docs_interactive(Db, Doc, Options, Futures, SeenIds) ->
