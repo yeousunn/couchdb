@@ -208,8 +208,12 @@ python-black-update: .venv/bin/black
 		. dev/run rel/overlay/bin/couchup test/javascript/run
 
 .PHONY: elixir
-elixir: devclean
-	@dev/run -n 1 -a adm:pass --no-eval 'test/elixir/run --exclude without_quorum_test --exclude with_quorum_test $(EXUNIT_OPTS)'
+elixir: elixir-init elixir-check-formatted elixir-credo devclean
+	@dev/run --erlang-config=rel/files/eunit.config -n 1 -a adm:pass --no-eval 'test/elixir/run --exclude without_quorum_test --exclude with_quorum_test $(EXUNIT_OPTS)'
+
+.PHONY: elixir-only
+elixir-only: devclean
+	@dev/run --erlang-config=rel/files/eunit.config -n 1 -a adm:pass --no-eval 'test/elixir/run-only --exclude without_quorum_test --exclude with_quorum_test $(EXUNIT_OPTS)'
 
 .PHONY: elixir-init
 elixir-init:
