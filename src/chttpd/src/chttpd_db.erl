@@ -317,7 +317,7 @@ handle_partition_req(Req, _Db) ->
 handle_design_req(#httpd{
         path_parts=[_DbName, _Design, Name, <<"_",_/binary>> = Action | _Rest]
     }=Req, Db) ->
-    DbName = mem3:dbname(couch_db:name(Db)),
+    DbName = fabric2_db:name(Db),
     case ddoc_cache:open(DbName, <<"_design/", Name/binary>>) of
     {ok, DDoc} ->
         Handler = chttpd_handlers:design_handler(Action, fun bad_action_req/3),
@@ -379,15 +379,15 @@ db_req(#httpd{method='GET',path_parts=[DbName]}=Req, Db) ->
 db_req(#httpd{method='POST', path_parts=[DbName], user_ctx=Ctx}=Req, Db) ->
     chttpd:validate_ctype(Req, "application/json"),
 
-    W = chttpd:qs_value(Req, "w", integer_to_list(mem3:quorum(Db))),
-    Options = [{user_ctx,Ctx}, {w,W}],
+    Options = [{user_ctx,Ctx}],
 
-    Doc = couch_db:doc_from_json_obj_validate(Db, chttpd:json_body(Req)),
-    Doc2 = case Doc#doc.id of
+    Doc0 = chttpd:json_body(Req),
+    Doc1 = couch_doc:from_json_obj_validate(Doc0, fabric2_db:name(Db)),
+    Doc2 = case Doc1#doc.id of
         <<"">> ->
-            Doc#doc{id=couch_uuids:new(), revs={0, []}};
+            Doc1#doc{id=couch_uuids:new(), revs={0, []}};
         _ ->
-            Doc
+            Doc1
     end,
     DocId = Doc2#doc.id,
     case chttpd:qs_value(Req, "batch") of
@@ -460,22 +460,17 @@ db_req(#httpd{method='POST',path_parts=[_,<<"_bulk_docs">>], user_ctx=Ctx}=Req, 
         DocsArray0
     end,
     couch_stats:update_histogram([couchdb, httpd, bulk_docs], length(DocsArray)),
-    W = case couch_util:get_value(<<"w">>, JsonProps) of
-    Value when is_integer(Value) ->
-        integer_to_list(Value);
-    _ ->
-        chttpd:qs_value(Req, "w", integer_to_list(mem3:quorum(Db)))
-    end,
     case chttpd:header_value(Req, "X-Couch-Full-Commit") of
     "true" ->
-        Options = [full_commit, {user_ctx,Ctx}, {w,W}];
+        Options = [full_commit, {user_ctx,Ctx}];
     "false" ->
-        Options = [delay_commit, {user_ctx,Ctx}, {w,W}];
+        Options = [delay_commit, {user_ctx,Ctx}];
     _ ->
-        Options = [{user_ctx,Ctx}, {w,W}]
+        Options = [{user_ctx,Ctx}]
     end,
+    DbName = fabric2_db:name(Db),
     Docs = lists:map(fun(JsonObj) ->
-        Doc = couch_db:doc_from_json_obj_validate(Db, JsonObj),
+        Doc = couch_doc:from_json_obj_validate(JsonObj, DbName),
         validate_attachment_names(Doc),
         case Doc#doc.id of
             <<>> -> Doc#doc{id = couch_uuids:new()};
@@ -872,7 +867,7 @@ db_doc_req(#httpd{method='GET', mochi_req=MochiReq}=Req, Db, DocId) ->
         Doc = couch_doc_open(Db, DocId, Rev, Options2),
         send_doc(Req, Doc, Options2);
     _ ->
-        case fabric2_db:open_revs(Db, DocId, Revs, Options) of
+        case fabric2_db:open_doc_revs(Db, DocId, Revs, Options) of
             {ok, []} when Revs == all ->
                 chttpd:send_error(Req, {not_found, missing});
             {ok, Results} ->
@@ -923,7 +918,7 @@ db_doc_req(#httpd{method='POST', user_ctx=Ctx}=Req, Db, DocId) ->
         Doc = couch_doc_from_req(Req, Db, DocId, Json);
     false ->
         Rev = couch_doc:parse_rev(list_to_binary(couch_util:get_value("_rev", Form))),
-        Doc = case fabric2_db:open_revs(Db, DocId, [Rev], []) of
+        Doc = case fabric2_db:open_doc_revs(Db, DocId, [Rev], []) of
             {ok, [{ok, Doc0}]} ->
                 chttpd_stats:incr_reads(),
                 Doc0;
@@ -1324,7 +1319,7 @@ couch_doc_open(Db, DocId, Rev, Options) ->
              throw(Error)
          end;
     _ -> % open a specific rev (deletions come back as stubs)
-        case fabric2_db:open_revs(Db, DocId, [Rev], Options) of
+        case fabric2_db:open_doc_revs(Db, DocId, [Rev], Options) of
         {ok, [{ok, Doc}]} ->
             chttpd_stats:incr_reads(),
             Doc;
@@ -1500,7 +1495,7 @@ db_attachment_req(#httpd{method=Method, user_ctx=Ctx}=Req, Db, DocId, FileNamePa
             couch_db:validate_docid(Db, DocId),
             #doc{id=DocId};
         Rev ->
-            case fabric2_db:open_revs(Db, DocId, [Rev], [{user_ctx,Ctx}]) of
+            case fabric2_db:open_doc_revs(Db, DocId, [Rev], [{user_ctx,Ctx}]) of
             {ok, [{ok, Doc0}]} ->
                 chttpd_stats:incr_reads(),
                 Doc0;
@@ -1872,7 +1867,7 @@ bulk_get_open_doc_revs1(Db, Props, Options, {DocId, Revs}) ->
             bulk_get_open_doc_revs1(Db, Props, Options, {DocId, Revs, Options1})
     end;
 bulk_get_open_doc_revs1(Db, Props, _, {DocId, Revs, Options}) ->
-    case fabric2_db:open_revs(Db, DocId, Revs, Options) of
+    case fabric2_db:open_doc_revs(Db, DocId, Revs, Options) of
         {ok, []} ->
             RevStr = couch_util:get_value(<<"rev">>, Props),
             Error = {RevStr, <<"not_found">>, <<"missing">>},
