@@ -599,8 +599,7 @@ db_req(#httpd{path_parts=[_, <<"_bulk_get">>]}=Req, _Db) ->
 db_req(#httpd{method='POST',path_parts=[_,<<"_purge">>]}=Req, Db) ->
     couch_stats:increment_counter([couchdb, httpd, purge_requests]),
     chttpd:validate_ctype(Req, "application/json"),
-    W = chttpd:qs_value(Req, "w", integer_to_list(mem3:quorum(Db))),
-    Options = [{user_ctx, Req#httpd.user_ctx}, {w, W}],
+    Options = [{user_ctx, Req#httpd.user_ctx}],
     {IdsRevs} = chttpd:json_body_obj(Req),
     IdsRevs2 = [{Id, couch_doc:parse_revs(Revs)} || {Id, Revs} <- IdsRevs],
     MaxIds = config:get_integer("purge", "max_document_id_number", 100),
@@ -908,8 +907,7 @@ db_doc_req(#httpd{method='POST', user_ctx=Ctx}=Req, Db, DocId) ->
     couch_db:validate_docid(Db, DocId),
     chttpd:validate_ctype(Req, "multipart/form-data"),
 
-    W = chttpd:qs_value(Req, "w", integer_to_list(mem3:quorum(Db))),
-    Options = [{user_ctx,Ctx}, {w,W}],
+    Options = [{user_ctx,Ctx}],
 
     Form = couch_httpd:parse_form(Req),
     case proplists:is_defined("_doc", Form) of
@@ -1510,8 +1508,7 @@ db_attachment_req(#httpd{method=Method, user_ctx=Ctx}=Req, Db, DocId, FileNamePa
     DocEdited = Doc#doc{
         atts = NewAtt ++ [A || A <- Atts, couch_att:fetch(name, A) /= FileName]
     },
-    W = chttpd:qs_value(Req, "w", integer_to_list(mem3:quorum(Db))),
-    case fabric2_db:update_doc(Db, DocEdited, [{user_ctx,Ctx}, {w,W}]) of
+    case fabric2_db:update_doc(Db, DocEdited, [{user_ctx,Ctx}]) of
     {ok, UpdatedRev} ->
         chttpd_stats:incr_writes(),
         HttpCode = 201;
