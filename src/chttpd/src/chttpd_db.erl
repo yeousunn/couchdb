@@ -674,7 +674,7 @@ db_req(#httpd{path_parts=[_,OP]}=Req, _Db) when ?IS_ALL_DOCS(OP) ->
 db_req(#httpd{method='POST',path_parts=[_,<<"_missing_revs">>]}=Req, Db) ->
     chttpd:validate_ctype(Req, "application/json"),
     {JsonDocIdRevs} = chttpd:json_body_obj(Req),
-    case fabric:get_missing_revs(Db, JsonDocIdRevs) of
+    case fabric2_db:get_missing_revs(Db, JsonDocIdRevs) of
         {error, Reason} ->
             chttpd:send_error(Req, Reason);
         {ok, Results} ->
@@ -691,7 +691,7 @@ db_req(#httpd{path_parts=[_,<<"_missing_revs">>]}=Req, _Db) ->
 db_req(#httpd{method='POST',path_parts=[_,<<"_revs_diff">>]}=Req, Db) ->
     chttpd:validate_ctype(Req, "application/json"),
     {JsonDocIdRevs} = chttpd:json_body_obj(Req),
-    case fabric:get_missing_revs(Db, JsonDocIdRevs) of
+    case fabric2_db:get_missing_revs(Db, JsonDocIdRevs) of
         {error, Reason} ->
             chttpd:send_error(Req, Reason);
         {ok, Results} ->

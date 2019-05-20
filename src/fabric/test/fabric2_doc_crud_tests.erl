@@ -52,6 +52,7 @@ doc_crud_test_() ->
                 fun open_doc_revs_basic/1,
                 fun open_doc_revs_all/1,
                 fun open_doc_revs_latest/1,
+                fun get_missing_revs_basic/1,
                 fun open_missing_local_doc/1,
                 fun create_local_doc_basic/1,
                 fun update_local_doc_basic/1,
@@ -347,7 +348,7 @@ delete_doc_basic({Db, _}) ->
     },
     {ok, {Pos2, Rev2}} = fabric2_db:update_doc(Db, Doc2),
     Doc3 = Doc2#doc{revs = {Pos2, [Rev2, Rev1]}},
-    ?assertEqual({ok, Doc3}, fabric2_db:open_doc(Db, Doc2#doc.id)).
+    ?assertEqual({ok, Doc3}, fabric2_db:open_doc(Db, Doc2#doc.id, [deleted])).
 
 
 delete_changes_winner({Db, _}) ->
@@ -564,6 +565,54 @@ open_doc_revs_latest({Db, _}) ->
     ?assert(length(Docs) == 2),
     ?assert(lists:member({ok, Doc1}, Docs)),
     ?assert(lists:member({ok, Doc2}, Docs)).
+
+
+get_missing_revs_basic({Db, _}) ->
+    [Rev1, Rev2, Rev3] = lists:sort([
+            fabric2_util:uuid(),
+            fabric2_util:uuid(),
+            fabric2_util:uuid()
+        ]),
+    DocId = fabric2_util:uuid(),
+    Doc1 = #doc{
+        id = DocId,
+        revs = {2, [Rev3, Rev1]},
+        body = {[{<<"foo">>, <<"bar">>}]}
+    },
+    {ok, {2, _}} = fabric2_db:update_doc(Db, Doc1, [replicated_changes]),
+    Doc2 = Doc1#doc{
+        revs = {2, [Rev2, Rev1]},
+        body = {[{<<"bar">>, <<"foo">>}]}
+    },
+    {ok, {2, _}} = fabric2_db:update_doc(Db, Doc2, [replicated_changes]),
+
+    % Check that we can find all revisions
+    AllRevs = [{1, Rev1}, {2, Rev2}, {2, Rev3}],
+    ?assertEqual(
+            {ok, []},
+            fabric2_db:get_missing_revs(Db, [{DocId, AllRevs}])
+        ),
+
+    % Check that a missing revision is found with no possible ancestors
+    MissingRev = {2, fabric2_util:uuid()},
+    ?assertEqual(
+            {ok, [{DocId, [MissingRev], []}]},
+            fabric2_db:get_missing_revs(Db, [{DocId, [MissingRev]}])
+        ),
+
+    % Check that only a missing rev is returned
+    ?assertEqual(
+            {ok, [{DocId, [MissingRev], []}]},
+            fabric2_db:get_missing_revs(Db, [{DocId, [MissingRev | AllRevs]}])
+        ),
+
+    % Check that we can find possible ancestors
+    MissingWithAncestors = {4, fabric2_util:uuid()},
+    PossibleAncestors = [{2, Rev2}, {2, Rev3}],
+    ?assertEqual(
+            {ok, [{DocId, [MissingWithAncestors], PossibleAncestors}]},
+            fabric2_db:get_missing_revs(Db, [{DocId, [MissingWithAncestors]}])
+        ).
 
 
 open_missing_local_doc({Db, _}) ->

@@ -73,7 +73,7 @@
     %% get_doc_info/2,
     %% get_full_doc_info/2,
     %% get_full_doc_infos/2,
-    %% get_missing_revs/2,
+    get_missing_revs/2,
     %% get_design_doc/2,
     %% get_design_docs/1,
     %% get_design_doc_count/1,
@@ -461,6 +461,38 @@ open_doc_revs(Db, DocId, Revs, Options) ->
     end).
 
 
+get_missing_revs(Db, IdRevs) ->
+    AllRevInfos = fabric2_fdb:transactional(Db, fun(TxDb) ->
+        lists:foldl(fun({Id, _Revs}, Acc) ->
+            case maps:is_key(Id, Acc) of
+                true ->
+                    Acc;
+                false ->
+                    RevInfos = fabric2_fdb:get_all_revs(TxDb, Id),
+                    Acc#{Id => RevInfos}
+            end
+        end, #{}, IdRevs)
+    end),
+    AllMissing = lists:flatmap(fun({Id, Revs}) ->
+        #{Id := RevInfos} = AllRevInfos,
+        Missing = try
+            lists:foldl(fun(RevInfo, RevAcc) ->
+                if RevAcc /= [] -> ok; true ->
+                    throw(all_found)
+                end,
+                filter_found_revs(RevInfo, RevAcc)
+            end, Revs, RevInfos)
+        catch throw:all_found ->
+            []
+        end,
+        if Missing == [] -> []; true ->
+            PossibleAncestors = find_possible_ancestors(RevInfos, Missing),
+            [{Id, Missing, PossibleAncestors}]
+        end
+    end, IdRevs),
+    {ok, AllMissing}.
+
+
 update_doc(Db, Doc) ->
     update_doc(Db, Doc, []).
 
@@ -698,6 +730,54 @@ apply_open_doc_opts(Doc, Revs, Options) ->
                 meta = Meta1 ++ Meta2 ++ Meta3 ++ Meta4
             }}
     end.
+
+
+filter_found_revs(RevInfo, Revs) ->
+    #{
+        rev_id := {Pos, Rev},
+        rev_path := RevPath
+    } = RevInfo,
+    FullRevPath = [Rev | RevPath],
+    lists:flatmap(fun({FindPos, FindRev} = RevIdToFind) ->
+        if FindPos > Pos -> [RevIdToFind]; true ->
+            % Add 1 because lists:nth is 1 based
+            Idx = Pos - FindPos + 1,
+            case Idx > length(FullRevPath) of
+                true ->
+                    [RevIdToFind];
+                false ->
+                    case lists:nth(Idx, FullRevPath) == FindRev of
+                        true -> [];
+                        false -> [RevIdToFind]
+                    end
+            end
+        end
+    end, Revs).
+
+
+find_possible_ancestors(RevInfos, MissingRevs) ->
+    % Find any revinfos that are possible ancestors
+    % of the missing revs. A possible ancestor is
+    % any rev that has a start position less than
+    % any missing revision. Stated alternatively,
+    % find any revinfo that could theoretically
+    % extended to be one or more of the missing
+    % revisions.
+    %
+    % Since we are looking at any missing revision
+    % we can just compare against the maximum missing
+    % start position.
+    MaxMissingPos = case MissingRevs of
+        [] -> 0;
+        [_ | _] -> lists:max([Start || {Start, _Rev} <- MissingRevs])
+    end,
+    lists:flatmap(fun(RevInfo) ->
+        #{rev_id := {RevPos, _} = RevId} = RevInfo,
+        case RevPos < MaxMissingPos of
+            true -> [RevId];
+            false -> []
+        end
+    end, RevInfos).
 
 
 update_doc_int(#{} = Db, #doc{} = Doc, Options) ->
