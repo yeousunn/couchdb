@@ -599,7 +599,7 @@ fold_docs(#{} = Db, UserFun, UserAcc0, Options) ->
                 {key, DocId},
                 {value, couch_doc:rev_to_str(RevId)}
             ]}, UserAccIn))
-        end, UserAcc1, [{reverse, Reverse}]),
+        end, UserAcc1, [{reverse, Reverse}] ++ Options),
 
         {ok, maybe_stop(UserFun(Db, complete, UserAcc2))}
     catch throw:{stop, FinalUserAcc} ->
@@ -659,7 +659,7 @@ fold_changes(#{} = Db, SinceSeq0, UserFun, UserAcc0, Options) ->
                 {id, DocId},
                 {changes, [{[{rev, couch_doc:rev_to_str(RevId)}]}]}
             ] ++ DelMember}}, UserAccIn))
-        end, UserAcc1, [{reverse, Reverse}]),
+        end, UserAcc1, [{reverse, Reverse}] ++ Options),
 
         UserFun(Db, {stop, get('$last_changes_seq'), null}, UserAcc2)
     catch throw:{stop, FinalUserAcc} ->
@@ -906,7 +906,7 @@ get_dir_and_bounds(DbPrefix, Options) ->
     {Reverse, StartKey4, EndKey4}.
 
 
-get_since_seq(Seq) when Seq == 0; Seq == <<"0">> ->
+get_since_seq(Seq) when Seq == 0; Seq == <<"0">>; Seq == <<>> ->
     fabric2_util:seq_zero_vs();
 
 get_since_seq(Seq) when Seq == now; Seq == <<"now">> ->
