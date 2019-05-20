@@ -107,7 +107,7 @@ handle_changes_req1(#httpd{}=Req, Db) ->
                 mochi = Req,
                 threshold = Max
             },
-            fabric2_db:fold_changes(Db, <<>>, fun changes_callback/2, Acc0)
+            fabric2_db:fold_changes(Db, <<>>, fun changes_callback/3, Acc0)
         end);
     Feed when Feed =:= "continuous"; Feed =:= "longpoll"; Feed =:= "eventsource"  ->
         couch_stats:increment_counter([couchdb, httpd, clients_requesting_changes]),
@@ -117,7 +117,7 @@ handle_changes_req1(#httpd{}=Req, Db) ->
             threshold = Max
         },
         try
-            fabric:changes(Db, fun changes_callback/2, Acc0, ChangesArgs)
+            fabric:changes(Db, fun changes_callback/3, Acc0, ChangesArgs)
         after
             couch_stats:decrement_counter([couchdb, httpd, clients_requesting_changes])
         end;
@@ -127,15 +127,15 @@ handle_changes_req1(#httpd{}=Req, Db) ->
     end.
 
 % callbacks for continuous feed (newline-delimited JSON Objects)
-changes_callback(start, #cacc{feed = continuous} = Acc) ->
+changes_callback(_TxDb, start, #cacc{feed = continuous} = Acc) ->
     {ok, Resp} = chttpd:start_delayed_json_response(Acc#cacc.mochi, 200),
     {ok, Acc#cacc{mochi = Resp, responding = true}};
-changes_callback({change, Change}, #cacc{feed = continuous} = Acc) ->
+changes_callback(_TxDb, {change, Change}, #cacc{feed = continuous} = Acc) ->
     chttpd_stats:incr_rows(),
     Data = [?JSON_ENCODE(Change) | "\n"],
     Len = iolist_size(Data),
     maybe_flush_changes_feed(Acc, Data, Len);
-changes_callback({stop, EndSeq, Pending}, #cacc{feed = continuous} = Acc) ->
+changes_callback(_TxDb, {stop, EndSeq, Pending}, #cacc{feed = continuous} = Acc) ->
     #cacc{mochi = Resp, buffer = Buf} = Acc,
     Row = {[
         {<<"last_seq">>, EndSeq},
@@ -146,7 +146,7 @@ changes_callback({stop, EndSeq, Pending}, #cacc{feed = continuous} = Acc) ->
     chttpd:end_delayed_json_response(Resp1);
 
 % callbacks for eventsource feed (newline-delimited eventsource Objects)
-changes_callback(start, #cacc{feed = eventsource} = Acc) ->
+changes_callback(_TxDb, start, #cacc{feed = eventsource} = Acc) ->
     #cacc{mochi = Req} = Acc,
     Headers = [
         {"Content-Type", "text/event-stream"},
@@ -154,7 +154,7 @@ changes_callback(start, #cacc{feed = eventsource} = Acc) ->
     ],
     {ok, Resp} = chttpd:start_delayed_json_response(Req, 200, Headers),
     {ok, Acc#cacc{mochi = Resp, responding = true}};
-changes_callback({change, {ChangeProp}=Change}, #cacc{feed = eventsource} = Acc) ->
+changes_callback(_TxDb, {change, {ChangeProp}=Change}, #cacc{feed = eventsource} = Acc) ->
     chttpd_stats:incr_rows(),
     Seq = proplists:get_value(seq, ChangeProp),
     Chunk = [
@@ -164,34 +164,34 @@ changes_callback({change, {ChangeProp}=Change}, #cacc{feed = eventsource} = Acc)
     ],
     Len = iolist_size(Chunk),
     maybe_flush_changes_feed(Acc, Chunk, Len);
-changes_callback(timeout, #cacc{feed = eventsource} = Acc) ->
+changes_callback(_TxDb, timeout, #cacc{feed = eventsource} = Acc) ->
     #cacc{mochi = Resp} = Acc,
     Chunk = "event: heartbeat\ndata: \n\n",
     {ok, Resp1} = chttpd:send_delayed_chunk(Resp, Chunk),
     {ok, Acc#cacc{mochi = Resp1}};
-changes_callback({stop, _EndSeq}, #cacc{feed = eventsource} = Acc) ->
+changes_callback(_TxDb, {stop, _EndSeq}, #cacc{feed = eventsource} = Acc) ->
     #cacc{mochi = Resp, buffer = Buf} = Acc,
     {ok, Resp1} = chttpd:send_delayed_chunk(Resp, Buf),
     chttpd:end_delayed_json_response(Resp1);
 
 % callbacks for longpoll and normal (single JSON Object)
-changes_callback(start, #cacc{feed = normal} = Acc) ->
+changes_callback(_TxDb, start, #cacc{feed = normal} = Acc) ->
     #cacc{etag = Etag, mochi = Req} = Acc,
     FirstChunk = "{\"results\":[\n",
     {ok, Resp} = chttpd:start_delayed_json_response(Req, 200,
         [{"ETag",Etag}], FirstChunk),
     {ok, Acc#cacc{mochi = Resp, responding = true}};
-changes_callback(start, Acc) ->
+changes_callback(_TxDb, start, Acc) ->
     #cacc{mochi = Req} = Acc,
     FirstChunk = "{\"results\":[\n",
     {ok, Resp} = chttpd:start_delayed_json_response(Req, 200, [], FirstChunk),
     {ok, Acc#cacc{mochi = Resp, responding = true}};
-changes_callback({change, Change}, Acc) ->
+changes_callback(_TxDb, {change, Change}, Acc) ->
     chttpd_stats:incr_rows(),
     Data = [Acc#cacc.prepend, ?JSON_ENCODE(Change)],
     Len = iolist_size(Data),
     maybe_flush_changes_feed(Acc, Data, Len);
-changes_callback({stop, EndSeq, Pending}, Acc) ->
+changes_callback(_TxDb, {stop, EndSeq, Pending}, Acc) ->
     #cacc{buffer = Buf, mochi = Resp, threshold = Max} = Acc,
     Terminator = [
         "\n],\n\"last_seq\":",
@@ -203,22 +203,22 @@ changes_callback({stop, EndSeq, Pending}, Acc) ->
     {ok, Resp1} = chttpd:close_delayed_json_object(Resp, Buf, Terminator, Max),
     chttpd:end_delayed_json_response(Resp1);
 
-changes_callback(waiting_for_updates, #cacc{buffer = []} = Acc) ->
+changes_callback(_TxDb, waiting_for_updates, #cacc{buffer = []} = Acc) ->
     {ok, Acc};
-changes_callback(waiting_for_updates, Acc) ->
+changes_callback(_TxDb, waiting_for_updates, Acc) ->
     #cacc{buffer = Buf, mochi = Resp} = Acc,
     {ok, Resp1} = chttpd:send_delayed_chunk(Resp, Buf),
     {ok, Acc#cacc{buffer = [], bufsize = 0, mochi = Resp1}};
-changes_callback(timeout, Acc) ->
+changes_callback(_TxDb, timeout, Acc) ->
     {ok, Resp1} = chttpd:send_delayed_chunk(Acc#cacc.mochi, "\n"),
     {ok, Acc#cacc{mochi = Resp1}};
-changes_callback({error, Reason}, #cacc{mochi = #httpd{}} = Acc) ->
+changes_callback(_TxDb, {error, Reason}, #cacc{mochi = #httpd{}} = Acc) ->
     #cacc{mochi = Req} = Acc,
     chttpd:send_error(Req, Reason);
-changes_callback({error, Reason}, #cacc{feed = normal, responding = false} = Acc) ->
+changes_callback(_TxDb, {error, Reason}, #cacc{feed = normal, responding = false} = Acc) ->
     #cacc{mochi = Req} = Acc,
     chttpd:send_error(Req, Reason);
-changes_callback({error, Reason}, Acc) ->
+changes_callback(_TxDb, {error, Reason}, Acc) ->
     chttpd:send_delayed_error(Acc#cacc.mochi, Reason).
 
 maybe_flush_changes_feed(#cacc{bufsize=Size, threshold=Max} = Acc, Data, Len)
