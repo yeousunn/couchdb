@@ -368,7 +368,7 @@ do_db_req(#httpd{path_parts=[DbName|_], user_ctx=Ctx}=Req, Fun) ->
     {ok, Db} = fabric2_db:open(DbName, [{user_ctx, Ctx}]),
     Fun(Req, Db).
 
-db_req(#httpd{method='GET',path_parts=[DbName]}=Req, Db) ->
+db_req(#httpd{method='GET',path_parts=[_DbName]}=Req, Db) ->
     % measure the time required to generate the etag, see if it's worth it
     T0 = os:timestamp(),
     {ok, DbInfo} = fabric2_db:get_db_info(Db),
