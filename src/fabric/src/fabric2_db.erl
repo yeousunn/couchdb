@@ -563,17 +563,31 @@ update_docs(Db, Docs, Options) ->
                 end)
             end, Docs)
     end,
-    Status = lists:foldl(fun(Resp, Acc) ->
+    % Convert errors
+    Resps1 = lists:map(fun(Resp) ->
         case Resp of
-            {ok, _} -> Acc;
-            _ -> error
+            {#doc{} = Doc, Error} ->
+                #doc{
+                    id = DocId,
+                    revs = {RevPos, [Rev | _]}
+                } = Doc,
+                {{DocId, {RevPos, Rev}}, Error};
+            Else ->
+                Else
         end
-    end, ok, Resps0),
-    Resps1 = case lists:member(replicated_changes, Options) of
-        true -> [R || R <- Resps0, R /= {ok, []}];
-        false -> Resps0
-    end,
-    {Status, Resps1}.
+    end, Resps0),
+    case lists:member(replicated_changes, Options) of
+        true ->
+            {ok, [R || R <- Resps1, R /= {ok, []}]};
+        false ->
+            Status = lists:foldl(fun(Resp, Acc) ->
+                case Resp of
+                    {ok, _} -> Acc;
+                    _ -> error
+                end
+            end, ok, Resps1),
+            {Status, Resps1}
+    end.
 
 
 read_attachment(Db, DocId, AttId) ->
@@ -1164,28 +1178,25 @@ prep_and_validate(Db, NewDoc, PrevRevInfo) ->
 validate_doc_update(Db, #doc{id = <<"_design/", _/binary>>} = Doc, _) ->
     case catch check_is_admin(Db) of
         ok -> validate_ddoc(Db, Doc);
-        Error -> ?RETURN(Error)
+        Error -> ?RETURN({Doc, Error})
     end;
 validate_doc_update(Db, Doc, PrevDoc) ->
     #{
         security_doc := Security,
-        user_ctx := UserCtx,
         validate_doc_update_funs := VDUs
     } = Db,
     Fun = fun() ->
-        JsonCtx = fabric2_util:user_ctx_to_json(UserCtx),
-        try
-            lists:map(fun(VDU) ->
+        JsonCtx = fabric2_util:user_ctx_to_json(Db),
+        lists:map(fun(VDU) ->
+            try
                 case VDU(Doc, PrevDoc, JsonCtx, Security) of
                     ok -> ok;
-                    Error -> ?RETURN(Error)
+                    Error1 -> throw(Error1)
                 end
-            end, VDUs),
-            ok
-        catch
-            throw:Error ->
-                Error
-        end
+            catch throw:Error2 ->
+                ?RETURN({Doc, Error2})
+            end
+        end, VDUs)
     end,
     Stat = [couchdb, query_server, vdu_process_time],
     if VDUs == [] -> ok; true ->
@@ -1202,7 +1213,7 @@ validate_ddoc(Db, DDoc) ->
         throw:{compilation_error, Reason} ->
             throw({bad_request, compilation_error, Reason});
         throw:Error ->
-            ?RETURN(Error)
+            ?RETURN({DDoc, Error})
     end.
 
 

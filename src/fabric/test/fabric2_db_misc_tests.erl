@@ -61,7 +61,7 @@ empty_db_info({DbName, Db, _}) ->
 
 
 accessors({DbName, Db, _}) ->
-    SeqZero = fabric2_util:to_hex(fabric2_util:seq_zero()),
+    SeqZero = fabric2_fdb:vs_to_seq(fabric2_util:seq_zero_vs()),
     ?assertEqual(DbName, fabric2_db:name(Db)),
     ?assertEqual(0, fabric2_db:get_instance_start_time(Db)),
     ?assertEqual(nil, fabric2_db:get_pid(Db)),

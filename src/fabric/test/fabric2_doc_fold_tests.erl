@@ -61,14 +61,14 @@ cleanup({Db, _DocIdRevs, Ctx}) ->
 
 
 fold_docs_basic({Db, DocIdRevs, _}) ->
-    {ok, {?DOC_COUNT, Rows}} = fabric2_db:fold_docs(Db, fun fold_fun/3, []),
+    {ok, {?DOC_COUNT, Rows}} = fabric2_db:fold_docs(Db, fun fold_fun/2, []),
     ?assertEqual(DocIdRevs, lists:reverse(Rows)).
 
 
 fold_docs_rev({Db, DocIdRevs, _}) ->
     Opts = [{dir, rev}],
     {ok, {?DOC_COUNT, Rows}} =
-            fabric2_db:fold_docs(Db, fun fold_fun/3, [], Opts),
+            fabric2_db:fold_docs(Db, fun fold_fun/2, [], Opts),
     ?assertEqual(DocIdRevs, Rows).
 
 
@@ -76,7 +76,7 @@ fold_docs_with_start_key({Db, DocIdRevs, _}) ->
     {StartKey, _} = hd(DocIdRevs),
     Opts = [{start_key, StartKey}],
     {ok, {?DOC_COUNT, Rows}}
-            = fabric2_db:fold_docs(Db, fun fold_fun/3, [], Opts),
+            = fabric2_db:fold_docs(Db, fun fold_fun/2, [], Opts),
     ?assertEqual(DocIdRevs, lists:reverse(Rows)),
     if length(DocIdRevs) == 1 -> ok; true ->
         fold_docs_with_start_key({Db, tl(DocIdRevs), nil})
@@ -88,7 +88,7 @@ fold_docs_with_end_key({Db, DocIdRevs, _}) ->
     {EndKey, _} = hd(RevDocIdRevs),
     Opts = [{end_key, EndKey}],
     {ok, {?DOC_COUNT, Rows}} =
-            fabric2_db:fold_docs(Db, fun fold_fun/3, [], Opts),
+            fabric2_db:fold_docs(Db, fun fold_fun/2, [], Opts),
     ?assertEqual(RevDocIdRevs, Rows),
     if length(DocIdRevs) == 1 -> ok; true ->
         fold_docs_with_end_key({Db, lists:reverse(tl(RevDocIdRevs)), nil})
@@ -111,12 +111,12 @@ fold_docs_with_different_keys({Db, DocIdRevs, _}) ->
 check_all_combos(Db, StartKey, EndKey, Rows) ->
     Opts1 = make_opts(fwd, StartKey, EndKey, true),
     {ok, {?DOC_COUNT, Rows1}} =
-            fabric2_db:fold_docs(Db, fun fold_fun/3, [], Opts1),
+            fabric2_db:fold_docs(Db, fun fold_fun/2, [], Opts1),
     ?assertEqual(lists:reverse(Rows), Rows1),
 
     Opts2 = make_opts(fwd, StartKey, EndKey, false),
     {ok, {?DOC_COUNT, Rows2}} =
-            fabric2_db:fold_docs(Db, fun fold_fun/3, [], Opts2),
+            fabric2_db:fold_docs(Db, fun fold_fun/2, [], Opts2),
     Expect2 = if EndKey == undefined -> lists:reverse(Rows); true ->
         lists:reverse(all_but_last(Rows))
     end,
@@ -124,12 +124,12 @@ check_all_combos(Db, StartKey, EndKey, Rows) ->
 
     Opts3 = make_opts(rev, StartKey, EndKey, true),
     {ok, {?DOC_COUNT, Rows3}} =
-            fabric2_db:fold_docs(Db, fun fold_fun/3, [], Opts3),
+            fabric2_db:fold_docs(Db, fun fold_fun/2, [], Opts3),
     ?assertEqual(Rows, Rows3),
 
     Opts4 = make_opts(rev, StartKey, EndKey, false),
     {ok, {?DOC_COUNT, Rows4}} =
-            fabric2_db:fold_docs(Db, fun fold_fun/3, [], Opts4),
+            fabric2_db:fold_docs(Db, fun fold_fun/2, [], Opts4),
     Expect4 = if StartKey == undefined -> Rows; true ->
         tl(Rows)
     end,
@@ -197,13 +197,13 @@ pick_end_key(Rows) ->
     end.
 
 
-fold_fun(_Db, {meta, Meta}, _Acc) ->
+fold_fun({meta, Meta}, _Acc) ->
     Total = fabric2_util:get_value(total, Meta),
     {ok, {Total, []}};
-fold_fun(_Db, {row, Row}, {Total, Rows}) ->
+fold_fun({row, Row}, {Total, Rows}) ->
     RowId = fabric2_util:get_value(id, Row),
     RowId = fabric2_util:get_value(key, Row),
     RowRev = fabric2_util:get_value(value, Row),
     {ok, {Total, [{RowId, RowRev} | Rows]}};
-fold_fun(_Db, complete, Acc) ->
+fold_fun(complete, Acc) ->
     {ok, Acc}.

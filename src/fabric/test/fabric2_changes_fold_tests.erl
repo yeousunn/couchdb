@@ -49,13 +49,13 @@ setup() ->
             id = DocId,
             body = {[{<<"value">>, Val}]}
         },
-        {ok, Rev} = fabric2_db:update_doc(Db, Doc, []),
+        {ok, RevId} = fabric2_db:update_doc(Db, Doc, []),
         UpdateSeq = fabric2_db:get_update_seq(Db),
         #{
             id => DocId,
-            seq => UpdateSeq,
+            sequence => UpdateSeq,
             deleted => false,
-            rev => couch_doc:rev_to_str(Rev)
+            rev_id => RevId
         }
     end, lists:seq(1, ?DOC_COUNT)),
     {Db, Rows, Ctx}.
@@ -67,12 +67,12 @@ cleanup({Db, _DocIdRevs, Ctx}) ->
 
 
 fold_changes_basic({Db, DocRows, _}) ->
-    {ok, Rows} = fabric2_db:fold_changes(Db, 0, fun fold_fun/3, []),
+    {ok, Rows} = fabric2_db:fold_changes(Db, 0, fun fold_fun/2, []),
     ?assertEqual(lists:reverse(DocRows), Rows).
 
 
 fold_changes_since_now({Db, _, _}) ->
-    {ok, Rows} = fabric2_db:fold_changes(Db, now, fun fold_fun/3, []),
+    {ok, Rows} = fabric2_db:fold_changes(Db, now, fun fold_fun/2, []),
     ?assertEqual([], Rows).
 
 
@@ -80,21 +80,21 @@ fold_changes_since_seq({_, [], _}) ->
     ok;
 
 fold_changes_since_seq({Db, [Row | RestRows], _}) ->
-    #{seq := Since} = Row,
-    {ok, Rows} = fabric2_db:fold_changes(Db, Since, fun fold_fun/3, []),
+    #{sequence := Since} = Row,
+    {ok, Rows} = fabric2_db:fold_changes(Db, Since, fun fold_fun/2, []),
     ?assertEqual(lists:reverse(RestRows), Rows),
     fold_changes_since_seq({Db, RestRows, nil}).
 
 
 fold_changes_basic_rev({Db, _, _}) ->
     Opts = [{dir, rev}],
-    {ok, Rows} = fabric2_db:fold_changes(Db, 0, fun fold_fun/3, [], Opts),
+    {ok, Rows} = fabric2_db:fold_changes(Db, 0, fun fold_fun/2, [], Opts),
     ?assertEqual([], Rows).
 
 
 fold_changes_since_now_rev({Db, DocRows, _}) ->
     Opts = [{dir, rev}],
-    {ok, Rows} = fabric2_db:fold_changes(Db, now, fun fold_fun/3, [], Opts),
+    {ok, Rows} = fabric2_db:fold_changes(Db, now, fun fold_fun/2, [], Opts),
     ?assertEqual(DocRows, Rows).
 
 
@@ -102,24 +102,13 @@ fold_changes_since_seq_rev({_, [], _}) ->
     ok;
 
 fold_changes_since_seq_rev({Db, DocRows, _}) ->
-    #{seq := Since} = lists:last(DocRows),
+    #{sequence := Since} = lists:last(DocRows),
     Opts = [{dir, rev}],
-    {ok, Rows} = fabric2_db:fold_changes(Db, Since, fun fold_fun/3, [], Opts),
+    {ok, Rows} = fabric2_db:fold_changes(Db, Since, fun fold_fun/2, [], Opts),
     ?assertEqual(DocRows, Rows),
     RestRows = lists:sublist(DocRows, length(DocRows) - 1),
     fold_changes_since_seq_rev({Db, RestRows, nil}).
 
 
-fold_fun(_Db, start, Acc) ->
-    {ok, Acc};
-fold_fun(_Db, {change, {Props}}, Acc) ->
-    [{[{rev, Rev}]}] = fabric2_util:get_value(changes, Props),
-    Row = #{
-        id => fabric2_util:get_value(id, Props),
-        seq => fabric2_util:get_value(seq, Props),
-        deleted => fabric2_util:get_value(deleted, Props, false),
-        rev => Rev
-    },
-    {ok, [Row | Acc]};
-fold_fun(_Db, {stop, _LastSeq, null}, Acc) ->
-    {ok, Acc}.
+fold_fun(#{} = Change, Acc) ->
+    {ok, [Change | Acc]}.

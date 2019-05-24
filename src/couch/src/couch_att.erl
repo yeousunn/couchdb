@@ -400,9 +400,12 @@ flush(Db, DocId, Att1) ->
             % Already flushed
             Att1;
         _ when is_binary(Data) ->
-            IdentityMd5 = get_identity_md5(Data, fetch(encoding, Att4)),
-            couch_util:check_md5(IdentityMd5, ReqMd5),
-            fabric2_db:write_attachment(Db, DocId, Att4)
+            IdentMd5 = get_identity_md5(Data, fetch(encoding, Att4)),
+            if ReqMd5 == undefined -> ok; true ->
+                couch_util:check_md5(IdentMd5, ReqMd5)
+            end,
+            Att5 = store(md5, IdentMd5, Att4),
+            fabric2_db:write_attachment(Db, DocId, Att5)
     end.
 
 
