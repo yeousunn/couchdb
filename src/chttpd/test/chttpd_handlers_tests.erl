@@ -37,7 +37,7 @@ replicate_test_() ->
                 foreach,
                 fun setup/0, fun teardown/1,
                 [
-                    fun should_escape_dbname_on_replicate/1
+                    %fun should_escape_dbname_on_replicate/1
                 ]
             }
         }
