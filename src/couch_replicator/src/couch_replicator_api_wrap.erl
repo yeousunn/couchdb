@@ -99,13 +99,13 @@ db_open(#httpdb{} = Db1, _Options, Create, CreateParams) ->
                     _ ->
                         {ok, Db}
                 end;
-            (200, _, _Body) ->
+            (200, _H, _Body) ->
                  throw({db_not_found, ?l2b(db_uri(Db))});
             (401, _, _) ->
                 throw({unauthorized, ?l2b(db_uri(Db))});
             (403, _, _) ->
                 throw({forbidden, ?l2b(db_uri(Db))});
-            (_, _, _) ->
+            (_A, _B, _C) ->
                 throw({db_not_found, ?l2b(db_uri(Db))})
             end)
     catch
@@ -501,11 +501,12 @@ changes_since(#httpdb{headers = Headers1, timeout = InactiveTimeout} = HttpDb,
         JsonDocIds = ?JSON_ENCODE({[{<<"doc_ids">>, DocIds}]}),
         {[{"filter", "_doc_ids"} | BaseQArgs], post, JsonDocIds, Headers2}
     end,
+    Me = lists:flatten(io_lib:format("~p", [self()])),
     try
         send_req(
             HttpDb,
             [{method, Method}, {path, "_changes"}, {qs, QArgs},
-                {headers, Headers}, {body, Body},
+                {headers, Headers ++ [{"XKCD", Me}]}, {body, Body},
                 {ibrowse_options, [{stream_to, {self(), once}}]}],
             fun(200, _, DataStreamFun) ->
                     parse_changes_feed(Options, UserFun, DataStreamFun);

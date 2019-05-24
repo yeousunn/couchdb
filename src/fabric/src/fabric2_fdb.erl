@@ -45,9 +45,14 @@
     write_doc/6,
     write_local_doc/2,
 
+    read_attachment/3,
+    write_attachment/3,
+
     fold_docs/4,
     fold_changes/5,
     get_last_change/1,
+
+    vs_to_seq/1,
 
     debug_cluster/0,
     debug_cluster/2
@@ -260,13 +265,12 @@ get_info(#{} = Db) ->
 
     RawSeq = case erlfdb:wait(ChangesFuture) of
         [] ->
-            fabric2_util:seq_zero();
+            vs_to_seq(fabric2_util:seq_zero_vs());
         [{SeqKey, _}] ->
             {?DB_CHANGES, SeqVS} = erlfdb_tuple:unpack(SeqKey, DbPrefix),
-            <<51:8, SeqBin:12/binary>> = erlfdb_tuple:pack({SeqVS}),
-            SeqBin
+            vs_to_seq(SeqVS)
     end,
-    CProp = {update_seq, fabric2_util:to_hex(RawSeq)},
+    CProp = {update_seq, RawSeq},
 
     MProps = lists:flatmap(fun({K, V}) ->
         case erlfdb_tuple:unpack(K, DbPrefix) of
@@ -565,13 +569,37 @@ write_local_doc(#{} = Db0, Doc) ->
     ok.
 
 
-write_doc_body(#{} = Db0, #doc{} = Doc) ->
+read_attachment(#{} = Db, DocId, AttId) ->
     #{
-        tx := Tx
-    } = Db = ensure_current(Db0),
+        tx := Tx,
+        db_prefix := DbPrefix
+    } = ensure_current(Db),
 
-    {NewDocKey, NewDocVal} = doc_to_fdb(Db, Doc),
-    erlfdb:set(Tx, NewDocKey, NewDocVal).
+    AttKey = erlfdb_tuple:pack({?DB_ATTS, DocId, AttId}, DbPrefix),
+    case erlfdb:wait(erlfdb:get_range_startswith(Tx, AttKey)) of
+        not_found ->
+            throw({not_found, missing});
+        KVs ->
+            Vs = [V || {_K, V} <- KVs],
+            iolist_to_binary(Vs)
+    end.
+
+
+write_attachment(#{} = Db, DocId, Data) when is_binary(Data) ->
+    #{
+        tx := Tx,
+        db_prefix := DbPrefix
+    } = ensure_current(Db),
+
+    AttId = fabric2_util:uuid(),
+    Chunks = chunkify_attachment(Data),
+
+    lists:foldl(fun(Chunk, ChunkId) ->
+        AttKey = erlfdb_tuple:pack({?DB_ATTS, DocId, AttId, ChunkId}, DbPrefix),
+        ok = erlfdb:set(Tx, AttKey, Chunk),
+        ChunkId + 1
+    end, 0, Chunks),
+    {ok, AttId}.
 
 
 fold_docs(#{} = Db, UserFun, UserAcc0, Options) ->
@@ -634,38 +662,21 @@ fold_changes(#{} = Db, SinceSeq0, UserFun, UserAcc0, Options) ->
     end,
 
     try
-        % We have to track this to return last_seq
-        <<51:8, FirstSeq:12/binary>> = erlfdb_tuple:pack({SinceSeq1}),
-        put('$last_changes_seq', fabric2_util:to_hex(FirstSeq)),
-
-        UserAcc1 = maybe_stop(UserFun(Db, start, UserAcc0)),
-
-        UserAcc2 = erlfdb:fold_range(Tx, Start, End, fun({K, V}, UserAccIn) ->
-            {?DB_CHANGES, UpdateSeq} = erlfdb_tuple:unpack(K, DbPrefix),
+        {ok, erlfdb:fold_range(Tx, Start, End, fun({K, V}, UserAccIn) ->
+            {?DB_CHANGES, SeqVS} = erlfdb_tuple:unpack(K, DbPrefix),
             {DocId, Deleted, RevId} = erlfdb_tuple:unpack(V),
 
-            % This comes back as a versionstamp so we have
-            % to pack it to get a binary.
-            <<51:8, SeqBin:12/binary>> = erlfdb_tuple:pack({UpdateSeq}),
-            SeqHex = fabric2_util:to_hex(SeqBin),
-            put('$last_changes_seq', SeqHex),
+            Change = #{
+                id => DocId,
+                sequence => vs_to_seq(SeqVS),
+                rev_id => RevId,
+                deleted => Deleted
+            },
 
-            DelMember = if not Deleted -> []; true ->
-                [{deleted, true}]
-            end,
-
-            maybe_stop(UserFun(Db, {change, {[
-                {seq, SeqHex},
-                {id, DocId},
-                {changes, [{[{rev, couch_doc:rev_to_str(RevId)}]}]}
-            ] ++ DelMember}}, UserAccIn))
-        end, UserAcc1, [{reverse, Reverse}] ++ Options),
-
-        UserFun(Db, {stop, get('$last_changes_seq'), null}, UserAcc2)
+            maybe_stop(UserFun(Change, UserAccIn))
+        end, UserAcc0, [{reverse, Reverse}] ++ Options)}
     catch throw:{stop, FinalUserAcc} ->
         {ok, FinalUserAcc}
-    after
-        erase('$last_changes_seq')
     end.
 
 
@@ -682,8 +693,7 @@ get_last_change(#{} = Db) ->
             fabric2_util:to_hex(fabric2_util:seq_zero());
         [{K, _V}] ->
             {?DB_CHANGES, SeqVS} = erlfdb_tuple:unpack(K, DbPrefix),
-            <<51:8, SeqBin:12/binary>> = erlfdb_tuple:pack({SeqVS}),
-            fabric2_util:to_hex(SeqBin)
+            vs_to_seq(SeqVS)
     end.
 
 
@@ -691,6 +701,11 @@ maybe_stop({ok, Acc}) ->
     Acc;
 maybe_stop({stop, Acc}) ->
     throw({stop, Acc}).
+
+
+vs_to_seq(VS) ->
+    <<51:8, SeqBin:12/binary>> = erlfdb_tuple:pack({VS}),
+    fabric2_util:to_hex(SeqBin).
 
 
 debug_cluster() ->
@@ -728,6 +743,15 @@ bump_metadata_version(Tx) ->
     % metadata version key. Not sure why 14 bytes when version
     % stamps are only 80, but whatever for now.
     erlfdb:set_versionstamped_value(Tx, ?METADATA_VERSION_KEY, <<0:112>>).
+
+
+write_doc_body(#{} = Db0, #doc{} = Doc) ->
+    #{
+        tx := Tx
+    } = Db = ensure_current(Db0),
+
+    {NewDocKey, NewDocVal} = doc_to_fdb(Db, Doc),
+    erlfdb:set(Tx, NewDocKey, NewDocVal).
 
 
 revinfo_to_fdb(Tx, DbPrefix, DocId, #{winner := true} = RevId) ->
@@ -793,7 +817,7 @@ doc_to_fdb(Db, #doc{} = Doc) ->
         body = Body,
         atts = Atts,
         deleted = Deleted
-    } = Doc,
+    } = doc_flush_atts(Db, Doc),
 
     Key = erlfdb_tuple:pack({?DB_DOCS, Id, Start, Rev}, DbPrefix),
     Val = {Body, Atts, Deleted},
@@ -844,6 +868,24 @@ fdb_to_local_doc(_Db, DocId, Bin) when is_binary(Bin) ->
     };
 fdb_to_local_doc(_Db, _DocId, not_found) ->
     {not_found, missing}.
+
+
+doc_flush_atts(Db, Doc) ->
+    Atts = lists:map(fun(Att) ->
+        couch_att:flush(Db, Doc#doc.id, Att)
+    end, Doc#doc.atts),
+    Doc#doc{atts = Atts}.
+
+
+chunkify_attachment(Data) ->
+    case Data of
+        <<>> ->
+            [];
+        <<Head:?ATTACHMENT_CHUNK_SIZE/binary, Rest/binary>> ->
+            [Head | chunkify_attachment(Rest)];
+        <<_/binary>> when size(Data) < ?ATTACHMENT_CHUNK_SIZE ->
+            [Data]
+    end.
 
 
 get_dir_and_bounds(DbPrefix, Options) ->
@@ -906,7 +948,7 @@ get_dir_and_bounds(DbPrefix, Options) ->
     {Reverse, StartKey4, EndKey4}.
 
 
-get_since_seq(Seq) when Seq == 0; Seq == <<"0">>; Seq == <<>> ->
+get_since_seq(Seq) when Seq == <<>>; Seq == <<"0">>; Seq == 0->
     fabric2_util:seq_zero_vs();
 
 get_since_seq(Seq) when Seq == now; Seq == <<"now">> ->
@@ -916,7 +958,13 @@ get_since_seq(Seq) when is_binary(Seq), size(Seq) == 24 ->
     Seq1 = fabric2_util:from_hex(Seq),
     Seq2 = <<51:8, Seq1/binary>>,
     {SeqVS} = erlfdb_tuple:unpack(Seq2),
-    SeqVS.
+    SeqVS;
+
+get_since_seq(List) when is_list(List) ->
+    get_since_seq(list_to_binary(List));
+
+get_since_seq(Seq) ->
+    erlang:error({invalid_since_seq, Seq}).
 
 
 get_db_handle() ->

@@ -40,6 +40,7 @@
 -define(DB_REVS, 20).
 -define(DB_DOCS, 21).
 -define(DB_LOCAL_DOCS, 22).
+-define(DB_ATTS, 23).
 
 
 % Versions
@@ -54,3 +55,6 @@
 -define(PDICT_TX_ID_KEY, '$fabric_tx_id').
 -define(PDICT_TX_RES_KEY, '$fabric_tx_result').
 -define(COMMIT_UNKNOWN_RESULT, 1021).
+
+
+-define(ATTACHMENT_CHUNK_SIZE, 100000).

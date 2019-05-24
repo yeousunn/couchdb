@@ -93,9 +93,9 @@ handle_changes_req(#httpd{path_parts=[_,<<"_changes">>]}=Req, _Db) ->
 handle_changes_req1(#httpd{}=Req, Db) ->
     #changes_args{filter=Raw, style=Style} = Args0 = parse_changes_query(Req),
     ChangesArgs = Args0#changes_args{
-        filter_fun = couch_changes:configure_filter(Raw, Style, Req, Db),
         db_open_options = [{user_ctx, fabric2_db:get_user_ctx(Db)}]
     },
+    ChangesFun = chttpd_changes:handle_db_changes(ChangesArgs, Req, Db),
     Max = chttpd:chunked_response_buffer_size(),
     case ChangesArgs#changes_args.feed of
     "normal" ->
@@ -107,7 +107,7 @@ handle_changes_req1(#httpd{}=Req, Db) ->
                 mochi = Req,
                 threshold = Max
             },
-            fabric2_db:fold_changes(Db, <<>>, fun changes_callback/3, Acc0)
+            ChangesFun({fun changes_callback/2, Acc0})
         end);
     Feed when Feed =:= "continuous"; Feed =:= "longpoll"; Feed =:= "eventsource"  ->
         couch_stats:increment_counter([couchdb, httpd, clients_requesting_changes]),
@@ -117,7 +117,7 @@ handle_changes_req1(#httpd{}=Req, Db) ->
             threshold = Max
         },
         try
-            fabric:changes(Db, fun changes_callback/3, Acc0, ChangesArgs)
+            ChangesFun({fun changes_callback/2, Acc0})
         after
             couch_stats:decrement_counter([couchdb, httpd, clients_requesting_changes])
         end;
@@ -127,15 +127,15 @@ handle_changes_req1(#httpd{}=Req, Db) ->
     end.
 
 % callbacks for continuous feed (newline-delimited JSON Objects)
-changes_callback(_TxDb, start, #cacc{feed = continuous} = Acc) ->
+changes_callback(start, #cacc{feed = continuous} = Acc) ->
     {ok, Resp} = chttpd:start_delayed_json_response(Acc#cacc.mochi, 200),
     {ok, Acc#cacc{mochi = Resp, responding = true}};
-changes_callback(_TxDb, {change, Change}, #cacc{feed = continuous} = Acc) ->
+changes_callback({change, Change}, #cacc{feed = continuous} = Acc) ->
     chttpd_stats:incr_rows(),
     Data = [?JSON_ENCODE(Change) | "\n"],
     Len = iolist_size(Data),
     maybe_flush_changes_feed(Acc, Data, Len);
-changes_callback(_TxDb, {stop, EndSeq, Pending}, #cacc{feed = continuous} = Acc) ->
+changes_callback({stop, EndSeq, Pending}, #cacc{feed = continuous} = Acc) ->
     #cacc{mochi = Resp, buffer = Buf} = Acc,
     Row = {[
         {<<"last_seq">>, EndSeq},
@@ -146,7 +146,7 @@ changes_callback(_TxDb, {stop, EndSeq, Pending}, #cacc{feed = continuous} = Acc)
     chttpd:end_delayed_json_response(Resp1);
 
 % callbacks for eventsource feed (newline-delimited eventsource Objects)
-changes_callback(_TxDb, start, #cacc{feed = eventsource} = Acc) ->
+changes_callback(start, #cacc{feed = eventsource} = Acc) ->
     #cacc{mochi = Req} = Acc,
     Headers = [
         {"Content-Type", "text/event-stream"},
@@ -154,7 +154,7 @@ changes_callback(_TxDb, start, #cacc{feed = eventsource} = Acc) ->
     ],
     {ok, Resp} = chttpd:start_delayed_json_response(Req, 200, Headers),
     {ok, Acc#cacc{mochi = Resp, responding = true}};
-changes_callback(_TxDb, {change, {ChangeProp}=Change}, #cacc{feed = eventsource} = Acc) ->
+changes_callback({change, {ChangeProp}=Change}, #cacc{feed = eventsource} = Acc) ->
     chttpd_stats:incr_rows(),
     Seq = proplists:get_value(seq, ChangeProp),
     Chunk = [
@@ -164,34 +164,34 @@ changes_callback(_TxDb, {change, {ChangeProp}=Change}, #cacc{feed = eventsource}
     ],
     Len = iolist_size(Chunk),
     maybe_flush_changes_feed(Acc, Chunk, Len);
-changes_callback(_TxDb, timeout, #cacc{feed = eventsource} = Acc) ->
+changes_callback(timeout, #cacc{feed = eventsource} = Acc) ->
     #cacc{mochi = Resp} = Acc,
     Chunk = "event: heartbeat\ndata: \n\n",
     {ok, Resp1} = chttpd:send_delayed_chunk(Resp, Chunk),
     {ok, Acc#cacc{mochi = Resp1}};
-changes_callback(_TxDb, {stop, _EndSeq}, #cacc{feed = eventsource} = Acc) ->
+changes_callback({stop, _EndSeq}, #cacc{feed = eventsource} = Acc) ->
     #cacc{mochi = Resp, buffer = Buf} = Acc,
     {ok, Resp1} = chttpd:send_delayed_chunk(Resp, Buf),
     chttpd:end_delayed_json_response(Resp1);
 
 % callbacks for longpoll and normal (single JSON Object)
-changes_callback(_TxDb, start, #cacc{feed = normal} = Acc) ->
+changes_callback(start, #cacc{feed = normal} = Acc) ->
     #cacc{etag = Etag, mochi = Req} = Acc,
     FirstChunk = "{\"results\":[\n",
     {ok, Resp} = chttpd:start_delayed_json_response(Req, 200,
         [{"ETag",Etag}], FirstChunk),
     {ok, Acc#cacc{mochi = Resp, responding = true}};
-changes_callback(_TxDb, start, Acc) ->
+changes_callback(start, Acc) ->
     #cacc{mochi = Req} = Acc,
     FirstChunk = "{\"results\":[\n",
     {ok, Resp} = chttpd:start_delayed_json_response(Req, 200, [], FirstChunk),
     {ok, Acc#cacc{mochi = Resp, responding = true}};
-changes_callback(_TxDb, {change, Change}, Acc) ->
+changes_callback({change, Change}, Acc) ->
     chttpd_stats:incr_rows(),
     Data = [Acc#cacc.prepend, ?JSON_ENCODE(Change)],
     Len = iolist_size(Data),
     maybe_flush_changes_feed(Acc, Data, Len);
-changes_callback(_TxDb, {stop, EndSeq, Pending}, Acc) ->
+changes_callback({stop, EndSeq, Pending}, Acc) ->
     #cacc{buffer = Buf, mochi = Resp, threshold = Max} = Acc,
     Terminator = [
         "\n],\n\"last_seq\":",
@@ -203,23 +203,26 @@ changes_callback(_TxDb, {stop, EndSeq, Pending}, Acc) ->
     {ok, Resp1} = chttpd:close_delayed_json_object(Resp, Buf, Terminator, Max),
     chttpd:end_delayed_json_response(Resp1);
 
-changes_callback(_TxDb, waiting_for_updates, #cacc{buffer = []} = Acc) ->
+changes_callback(waiting_for_updates, #cacc{buffer = []} = Acc) ->
     {ok, Acc};
-changes_callback(_TxDb, waiting_for_updates, Acc) ->
+changes_callback(waiting_for_updates, Acc) ->
     #cacc{buffer = Buf, mochi = Resp} = Acc,
     {ok, Resp1} = chttpd:send_delayed_chunk(Resp, Buf),
     {ok, Acc#cacc{buffer = [], bufsize = 0, mochi = Resp1}};
-changes_callback(_TxDb, timeout, Acc) ->
+changes_callback(timeout, Acc) ->
     {ok, Resp1} = chttpd:send_delayed_chunk(Acc#cacc.mochi, "\n"),
     {ok, Acc#cacc{mochi = Resp1}};
-changes_callback(_TxDb, {error, Reason}, #cacc{mochi = #httpd{}} = Acc) ->
+changes_callback({error, Reason}, #cacc{mochi = #httpd{}} = Acc) ->
     #cacc{mochi = Req} = Acc,
     chttpd:send_error(Req, Reason);
-changes_callback(_TxDb, {error, Reason}, #cacc{feed = normal, responding = false} = Acc) ->
+changes_callback({error, Reason}, #cacc{feed = normal, responding = false} = Acc) ->
     #cacc{mochi = Req} = Acc,
     chttpd:send_error(Req, Reason);
-changes_callback(_TxDb, {error, Reason}, Acc) ->
-    chttpd:send_delayed_error(Acc#cacc.mochi, Reason).
+changes_callback({error, Reason}, Acc) ->
+    chttpd:send_delayed_error(Acc#cacc.mochi, Reason);
+
+changes_callback(A, B) ->
+    erlang:error({changes_error, A, B}).
 
 maybe_flush_changes_feed(#cacc{bufsize=Size, threshold=Max} = Acc, Data, Len)
          when Size > 0 andalso (Size + Len) > Max ->
@@ -432,13 +435,10 @@ db_req(#httpd{method='POST', path_parts=[DbName], user_ctx=Ctx}=Req, Db) ->
 db_req(#httpd{path_parts=[_DbName]}=Req, _Db) ->
     send_method_not_allowed(Req, "DELETE,GET,HEAD,POST");
 
-db_req(#httpd{method='POST', path_parts=[DbName, <<"_ensure_full_commit">>],
-        user_ctx=Ctx}=Req, _Db) ->
+db_req(#httpd{method='POST', path_parts=[_DbName, <<"_ensure_full_commit">>],
+        user_ctx=Ctx}=Req, Db) ->
     chttpd:validate_ctype(Req, "application/json"),
-    %% use fabric call to trigger a database_does_not_exist exception
-    %% for missing databases that'd return error 404 from chttpd
-    %% get_security used to prefer shards on the same node over other nodes
-    fabric:get_security(DbName, [{user_ctx, Ctx}]),
+    #{db_prefix := <<_/binary>>} = Db,
     send_json(Req, 201, {[
         {ok, true},
         {instance_start_time, <<"0">>}
@@ -807,8 +807,8 @@ multi_all_docs_view(Req, Db, OP, Queries) ->
         200, [], FirstChunk),
     VAcc1 = VAcc0#vacc{resp=Resp0},
     VAcc2 = lists:foldl(fun(Args, Acc0) ->
-        {ok, Acc1} = fabric:all_docs(Db, Options,
-            fun view_cb/2, Acc0, Args),
+        {ok, Acc1} = fabric2_db:fold_docs(Db, Options,
+            fun view_cb/3, Acc0, Args),
         Acc1
     end, VAcc1, ArgQueries),
     {ok, Resp1} = chttpd:send_delayed_chunk(VAcc2#vacc.resp, "\r\n]}"),
@@ -822,10 +822,10 @@ all_docs_view(Req, Db, _Keys, _OP) ->
     Options = [{user_ctx, Req#httpd.user_ctx}],
     Max = chttpd:chunked_response_buffer_size(),
     VAcc = #vacc{db=Db, req=Req, threshold=Max},
-    {ok, Resp} = fabric2_db:fold_docs(Db, fun view_cb/2, VAcc, Options),
+    {ok, Resp} = fabric2_db:fold_docs(Db, fun view_cb/3, VAcc, Options),
     {ok, Resp#vacc.resp}.
 
-view_cb({row, Row} = Msg, Acc) ->
+view_cb(_TxDb, {row, Row} = Msg, Acc) ->
     case lists:keymember(doc, 1, Row) of
         true -> chttpd_stats:incr_reads();
         false -> ok
@@ -833,7 +833,7 @@ view_cb({row, Row} = Msg, Acc) ->
     chttpd_stats:incr_rows(),
     couch_mrview_http:view_cb(Msg, Acc);
 
-view_cb(Msg, Acc) ->
+view_cb(_TxDb, Msg, Acc) ->
     couch_mrview_http:view_cb(Msg, Acc).
 
 db_doc_req(#httpd{method='DELETE'}=Req, Db, DocId) ->
@@ -974,7 +974,7 @@ db_doc_req(#httpd{method='PUT', user_ctx=Ctx}=Req, Db, DocId) ->
     case couch_util:to_list(couch_httpd:header_value(Req, "Content-Type")) of
     ("multipart/related;" ++ _) = ContentType ->
         couch_httpd:check_max_request_length(Req),
-        couch_httpd_multipart:num_mp_writers(mem3:n(mem3:dbname(DbName), DocId)),
+        couch_httpd_multipart:num_mp_writers(1),
         {ok, Doc0, WaitFun, Parser} = couch_doc:doc_from_multi_part_stream(ContentType,
                 fun() -> receive_request_data(Req) end),
         Doc = couch_doc_from_req(Req, Db, DocId, Doc0),
@@ -1129,7 +1129,7 @@ send_docs_multipart(Req, Results, Options1) ->
     CType = {"Content-Type",
         "multipart/mixed; boundary=\"" ++ ?b2l(OuterBoundary) ++ "\""},
     {ok, Resp} = start_chunked_response(Req, 200, [CType]),
-    couch_httpd:send_chunk(Resp, <<"--", OuterBoundary/binary>>),
+    chttpd:send_chunk(Resp, <<"--", OuterBoundary/binary>>),
     lists:foreach(
         fun({ok, #doc{atts=Atts}=Doc}) ->
             Refs = monitor_attachments(Doc#doc.atts),
@@ -1137,25 +1137,25 @@ send_docs_multipart(Req, Results, Options1) ->
             JsonBytes = ?JSON_ENCODE(couch_doc:to_json_obj(Doc, Options)),
             {ContentType, _Len} = couch_doc:len_doc_to_multi_part_stream(
                     InnerBoundary, JsonBytes, Atts, true),
-            couch_httpd:send_chunk(Resp, <<"\r\nContent-Type: ",
+            chttpd:send_chunk(Resp, <<"\r\nContent-Type: ",
                     ContentType/binary, "\r\n\r\n">>),
             couch_doc:doc_to_multi_part_stream(InnerBoundary, JsonBytes, Atts,
-                    fun(Data) -> couch_httpd:send_chunk(Resp, Data)
+                    fun(Data) -> chttpd:send_chunk(Resp, Data)
                     end, true),
-             couch_httpd:send_chunk(Resp, <<"\r\n--", OuterBoundary/binary>>)
+             chttpd:send_chunk(Resp, <<"\r\n--", OuterBoundary/binary>>)
             after
                 demonitor_refs(Refs)
             end;
         ({{not_found, missing}, RevId}) ->
              RevStr = couch_doc:rev_to_str(RevId),
              Json = ?JSON_ENCODE({[{<<"missing">>, RevStr}]}),
-             couch_httpd:send_chunk(Resp,
+             chttpd:send_chunk(Resp,
                 [<<"\r\nContent-Type: application/json; error=\"true\"\r\n\r\n">>,
                 Json,
                 <<"\r\n--", OuterBoundary/binary>>])
          end, Results),
-    couch_httpd:send_chunk(Resp, <<"--">>),
-    couch_httpd:last_chunk(Resp).
+    chttpd:send_chunk(Resp, <<"--">>),
+    chttpd:last_chunk(Resp).
 
 bulk_get_multipart_headers({0, []}, Id, Boundary) ->
     [
@@ -1438,8 +1438,12 @@ db_attachment_req(#httpd{method='GET',mochi_req=MochiReq}=Req, Db, DocId, FileNa
     end;
 
 
-db_attachment_req(#httpd{method=Method, user_ctx=Ctx}=Req, Db, DocId, FileNameParts)
+db_attachment_req(#httpd{method=Method}=Req, Db, DocId, FileNameParts)
         when (Method == 'PUT') or (Method == 'DELETE') ->
+    #httpd{
+        user_ctx = Ctx,
+        mochi_req = MochiReq
+    } = Req,
     FileName = validate_attachment_name(
                     mochiweb_util:join(
                         lists:map(fun binary_to_list/1,
@@ -1449,16 +1453,45 @@ db_attachment_req(#httpd{method=Method, user_ctx=Ctx}=Req, Db, DocId, FileNamePa
         'DELETE' ->
             [];
         _ ->
-            MimeType = case couch_httpd:header_value(Req,"Content-Type") of
+            MimeType = case chttpd:header_value(Req,"Content-Type") of
                 % We could throw an error here or guess by the FileName.
                 % Currently, just giving it a default.
                 undefined -> <<"application/octet-stream">>;
                 CType -> list_to_binary(CType)
             end,
-            Data = fabric:att_receiver(Req, chttpd:body_length(Req)),
+            Data = case chttpd:body_length(Req) of
+                undefined ->
+                    <<"">>;
+                {unknown_transfer_encoding, Unknown} ->
+                    exit({unknown_transfer_encoding, Unknown});
+                chunked ->
+                    fun(MaxChunkSize, ChunkFun, InitState) ->
+                        chttpd:recv_chunked(
+                            Req, MaxChunkSize, ChunkFun, InitState
+                        )
+                    end;
+                0 ->
+                    <<"">>;
+                Length when is_integer(Length) ->
+                    Expect = case chttpd:header_value(Req, "expect") of
+                        undefined ->
+                            undefined;
+                        Value when is_list(Value) ->
+                            string:to_lower(Value)
+                    end,
+                    case Expect of
+                        "100-continue" ->
+                            MochiReq:start_raw_response({100, gb_trees:empty()});
+                        _Else ->
+                            ok
+                    end,
+                    fun() -> chttpd:recv(Req, 0) end;
+                Length ->
+                    exit({length_not_integer, Length})
+            end,
             ContentLen = case couch_httpd:header_value(Req,"Content-Length") of
                 undefined -> undefined;
-                Length -> list_to_integer(Length)
+                CL -> list_to_integer(CL)
             end,
             ContentEnc = string:to_lower(string:strip(
                 couch_httpd:header_value(Req, "Content-Encoding", "identity")
@@ -1517,7 +1550,7 @@ db_attachment_req(#httpd{method=Method, user_ctx=Ctx}=Req, Db, DocId, FileNamePa
         HttpCode = 202
     end,
     erlang:put(mochiweb_request_recv, true),
-    DbName = couch_db:name(Db),
+    DbName = fabric2_db:name(Db),
 
     {Status, Headers} = case Method of
         'DELETE' ->
@@ -1673,7 +1706,7 @@ parse_changes_query(Req) ->
         {"descending", "true"} ->
             Args#changes_args{dir=rev};
         {"since", _} ->
-            Args#changes_args{since=Value};
+            Args#changes_args{since=parse_since_seq(Value)};
         {"last-event-id", _} ->
             Args#changes_args{since=Value};
         {"limit", _} ->
@@ -1727,6 +1760,27 @@ parse_changes_query(Req) ->
             ChangesArgs
     end.
 
+
+parse_since_seq(Seq) when is_binary(Seq), size(Seq) > 30 ->
+    throw({bad_request, url_encoded_since_seq});
+
+parse_since_seq(Seq) when is_binary(Seq), size(Seq) > 2 ->
+    % We have implicitly allowed the since seq to either be
+    % JSON encoded or a "raw" string. Here we just remove the
+    % surrounding quotes if they exist and are paired.
+    SeqSize = size(Seq) - 2,
+    case Seq of
+        <<"\"", S:SeqSize/binary, "\"">> -> S;
+        S -> S
+    end;
+
+parse_since_seq(Seq) when is_binary(Seq) ->
+    Seq;
+
+parse_since_seq(Seq) when is_list(Seq) ->
+    parse_since_seq(iolist_to_binary(Seq)).
+
+
 extract_header_rev(Req, ExplicitRev) when is_binary(ExplicitRev) or is_list(ExplicitRev)->
     extract_header_rev(Req, couch_doc:parse_rev(ExplicitRev));
 extract_header_rev(Req, ExplicitRev) ->
@@ -1767,6 +1821,8 @@ monitor_attachments(Atts) when is_list(Atts) ->
         case couch_att:fetch(data, Att) of
             {Fd, _} ->
                 [monitor(process, Fd) | Monitors];
+            {loc, _, _, _} ->
+                Monitors;
             stub ->
                 Monitors;
             Else ->

@@ -977,6 +977,7 @@ update_task(State) ->
         current_through_seq = {_, ThroughSeq},
         highest_seq_done = {_, HighestSeq}
     } = State,
+    couch_log:error("XKCD: UPDATE REPL TASK: ~p : ~p", [ThroughSeq, HighestSeq]),
     update_scheduler_job_stats(State),
     couch_task_status:update(
         rep_stats(State) ++ [

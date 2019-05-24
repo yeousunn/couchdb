@@ -60,7 +60,8 @@
 handle_db_changes(Args, Req, Db) ->
     handle_changes(Args, Req, Db, db).
 
-handle_changes(Args1, Req, Db0, Type) ->
+handle_changes(Args1, Req, Db, Type) ->
+    ReqPid = chttpd:header_value(Req, "XKCD", "<unknown>"),
     #changes_args{
         style = Style,
         filter = FilterName,
@@ -68,7 +69,8 @@ handle_changes(Args1, Req, Db0, Type) ->
         dir = Dir,
         since = Since
     } = Args1,
-    Filter = configure_filter(FilterName, Style, Req, Db0),
+    couch_log:error("XKCD: STARTING CHANGES FEED ~p for ~s : ~p", [self(), ReqPid, Since]),
+    Filter = configure_filter(FilterName, Style, Req, Db),
     Args = Args1#changes_args{filter_fun = Filter},
     % The type of changes feed depends on the supplied filter. If the query is
     % for an optimized view-filtered db changes, we need to use the view
@@ -81,7 +83,7 @@ handle_changes(Args1, Req, Db0, Type) ->
         _ ->
             {false, undefined, undefined}
     end,
-    DbName = couch_db:name(Db0),
+    DbName = fabric2_db:name(Db),
     {StartListenerFun, View} = if UseViewChanges ->
         {ok, {_, View0, _}, _, _} = couch_mrview_util:get_view(
                 DbName, DDocName, ViewName, #mrargs{}),
@@ -99,17 +101,16 @@ handle_changes(Args1, Req, Db0, Type) ->
         {SNFun, View0};
     true ->
         SNFun = fun() ->
-            couch_event:link_listener(
-                 ?MODULE, handle_db_event, self(), [{dbname, DbName}]
-            )
+            fabric2_events:link_listener(
+                    ?MODULE, handle_db_event, self(), [{dbname, DbName}]
+                )
         end,
         {SNFun, undefined}
     end,
     Start = fun() ->
-        {ok, Db} = couch_db:reopen(Db0),
         StartSeq = case Dir of
         rev ->
-            couch_db:get_update_seq(Db);
+            fabric2_fdb:get_update_seq(Db);
         fwd ->
             Since
         end,
@@ -137,7 +138,7 @@ handle_changes(Args1, Req, Db0, Type) ->
             {ok, Listener} = StartListenerFun(),
 
             {Db, View, StartSeq} = Start(),
-            UserAcc2 = start_sending_changes(Callback, UserAcc, Feed),
+            UserAcc2 = start_sending_changes(Callback, UserAcc),
             {Timeout, TimeoutFun} = get_changes_timeout(Args, Callback),
             Acc0 = build_acc(Args, Callback, UserAcc2, Db, StartSeq,
                              <<"">>, Timeout, TimeoutFun, DDocName, ViewName,
@@ -148,14 +149,14 @@ handle_changes(Args1, Req, Db0, Type) ->
                     Acc0,
                     true)
             after
-                couch_event:stop_listener(Listener),
+                fabric2_events:stop_listener(Listener),
                 get_rest_updated(ok) % clean out any remaining update messages
             end
         end;
     false ->
         fun(CallbackAcc) ->
             {Callback, UserAcc} = get_callback_acc(CallbackAcc),
-            UserAcc2 = start_sending_changes(Callback, UserAcc, Feed),
+            UserAcc2 = start_sending_changes(Callback, UserAcc),
             {Timeout, TimeoutFun} = get_changes_timeout(Args, Callback),
             {Db, View, StartSeq} = Start(),
             Acc0 = build_acc(Args#changes_args{feed="normal"}, Callback,
@@ -166,7 +167,7 @@ handle_changes(Args1, Req, Db0, Type) ->
                     Acc0,
                     Dir,
                     true),
-            end_sending_changes(Callback, UserAcc3, LastSeq, Feed)
+            end_sending_changes(Callback, UserAcc3, LastSeq)
         end
     end.
 
@@ -192,10 +193,10 @@ handle_view_event(_DbName, Msg, {Parent, DDocId}) ->
     end,
     {ok, {Parent, DDocId}}.
 
-get_callback_acc({Callback, _UserAcc} = Pair) when is_function(Callback, 3) ->
+get_callback_acc({Callback, _UserAcc} = Pair) when is_function(Callback, 2) ->
     Pair;
-get_callback_acc(Callback) when is_function(Callback, 2) ->
-    {fun(Ev, Data, _) -> Callback(Ev, Data) end, ok}.
+get_callback_acc(Callback) when is_function(Callback, 1) ->
+    {fun(Ev, _) -> Callback(Ev) end, ok}.
 
 
 configure_filter("_doc_ids", Style, Req, _Db) ->
@@ -223,7 +224,7 @@ configure_filter("_view", Style, Req, Db) ->
             catch _:_ ->
                 view
             end,
-            case couch_db:is_clustered(Db) of
+            case fabric2_db:is_clustered(Db) of
                 true ->
                     DIR = fabric_util:doc_id_and_rev(DDoc),
                     {fetch, FilterType, Style, DIR, VName};
@@ -246,8 +247,7 @@ configure_filter(FilterName, Style, Req, Db) ->
         [DName, FName] ->
             {ok, DDoc} = open_ddoc(Db, <<"_design/", DName/binary>>),
             check_member_exists(DDoc, [<<"filters">>, FName]),
-            DIR = fabric_util:doc_id_and_rev(DDoc),
-            {fetch, custom, Style, Req, DIR, FName};
+            {custom, Style, Req, DDoc, FName};
         [] ->
             {default, Style};
         _Else ->
@@ -256,45 +256,45 @@ configure_filter(FilterName, Style, Req, Db) ->
     end.
 
 
-filter(Db, #full_doc_info{}=FDI, Filter) ->
-    filter(Db, couch_doc:to_doc_info(FDI), Filter);
-filter(_Db, DocInfo, {default, Style}) ->
-    apply_style(DocInfo, Style);
-filter(_Db, DocInfo, {doc_ids, Style, DocIds}) ->
-    case lists:member(DocInfo#doc_info.id, DocIds) of
+filter(Db, Change, {default, Style}) ->
+    apply_style(Db, Change, Style);
+filter(Db, Change, {doc_ids, Style, DocIds}) ->
+    case lists:member(maps:get(id, Change), DocIds) of
         true ->
-            apply_style(DocInfo, Style);
+            apply_style(Db, Change, Style);
         false ->
             []
     end;
-filter(Db, DocInfo, {selector, Style, {Selector, _Fields}}) ->
-    Docs = open_revs(Db, DocInfo, Style),
+filter(Db, Change, {selector, Style, {Selector, _Fields}}) ->
+    Docs = open_revs(Db, Change, Style),
     Passes = [mango_selector:match(Selector, couch_doc:to_json_obj(Doc, []))
         || Doc <- Docs],
     filter_revs(Passes, Docs);
-filter(_Db, DocInfo, {design_docs, Style}) ->
-    case DocInfo#doc_info.id of
+filter(Db, Change, {design_docs, Style}) ->
+    case maps:get(id, Change) of
         <<"_design", _/binary>> ->
-            apply_style(DocInfo, Style);
+            apply_style(Db, Change, Style);
         _ ->
             []
     end;
-filter(Db, DocInfo, {FilterType, Style, DDoc, VName})
+filter(Db, Change, {FilterType, Style, DDoc, VName})
         when FilterType == view; FilterType == fast_view ->
-    Docs = open_revs(Db, DocInfo, Style),
+    Docs = open_revs(Db, Change, Style),
     {ok, Passes} = couch_query_servers:filter_view(DDoc, VName, Docs),
     filter_revs(Passes, Docs);
-filter(Db, DocInfo, {custom, Style, Req0, DDoc, FName}) ->
+filter(Db, Change, {custom, Style, Req0, DDoc, FName}) ->
     Req = case Req0 of
         {json_req, _} -> Req0;
-        #httpd{} -> {json_req, couch_httpd_external:json_req_obj(Req0, Db)}
+        #httpd{} -> {json_req, chttpd_external:json_req_obj(Req0, Db)}
     end,
-    Docs = open_revs(Db, DocInfo, Style),
+    Docs = open_revs(Db, Change, Style),
     {ok, Passes} = couch_query_servers:filter_docs(Req, Db, DDoc, FName, Docs),
-    filter_revs(Passes, Docs).
+    filter_revs(Passes, Docs);
+filter(A, B, C) ->
+    erlang:error({filter_error, A, B, C}).
 
 fast_view_filter(Db, {{Seq, _}, {ID, _, _}}, {fast_view, Style, _, _}) ->
-    case couch_db:get_doc_info(Db, ID) of
+    case fabric2_db:get_doc_info(Db, ID) of
         {ok, #doc_info{high_seq=Seq}=DocInfo} ->
             Docs = open_revs(Db, DocInfo, Style),
             Changes = lists:map(fun(#doc{revs={RevPos, [RevId | _]}}) ->
@@ -404,32 +404,51 @@ check_member_exists(#doc{body={Props}}, Path) ->
     couch_util:get_nested_json_value({Props}, Path).
 
 
-apply_style(#doc_info{revs=Revs}, main_only) ->
-    [#rev_info{rev=Rev} | _] = Revs,
-    [{[{<<"rev">>, couch_doc:rev_to_str(Rev)}]}];
-apply_style(#doc_info{revs=Revs}, all_docs) ->
-    [{[{<<"rev">>, couch_doc:rev_to_str(R)}]} || #rev_info{rev=R} <- Revs].
+apply_style(_Db, Change, main_only) ->
+    #{rev_id := RevId} = Change,
+    [{[{<<"rev">>, couch_doc:rev_to_str(RevId)}]}];
+apply_style(Db, Change, all_docs) ->
+    % We have to fetch all revs for this row
+    #{id := DocId} = Change,
+    {ok, Resps} = fabric2_db:open_doc_revs(Db, DocId, all, [deleted]),
+    lists:flatmap(fun(Resp) ->
+        case Resp of
+            {ok, #doc{revs = {Pos, [Rev | _]}}} ->
+                [{[{<<"rev">>, couch_doc:rev_to_str({Pos, Rev})}]}];
+            _ ->
+                []
+        end
+    end, Resps);
+apply_style(A, B, C) ->
+    erlang:error({changes_apply_style, A, B, C}).
 
 apply_view_style(_Db, {{_Seq, _Key}, {_ID, _Value, Rev}}, main_only) ->
     [{[{<<"rev">>, couch_doc:rev_to_str(Rev)}]}];
 apply_view_style(Db, {{_Seq, _Key}, {ID, _Value, _Rev}}, all_docs) ->
     case couch_db:get_doc_info(Db, ID) of
         {ok, DocInfo} ->
-            apply_style(DocInfo, all_docs);
+            apply_style(Db, DocInfo, all_docs);
         {error, not_found} ->
             []
     end.
 
 
-open_revs(Db, DocInfo, Style) ->
-    DocInfos = case Style of
-        main_only -> [DocInfo];
-        all_docs -> [DocInfo#doc_info{revs=[R]}|| R <- DocInfo#doc_info.revs]
-    end,
-    OpenOpts = [deleted, conflicts],
-    % Relying on list comprehensions to silence errors
-    OpenResults = [couch_db:open_doc(Db, DI, OpenOpts) || DI <- DocInfos],
-    [Doc || {ok, Doc} <- OpenResults].
+open_revs(Db, Change, Style) ->
+    #{id := DocId} = Change,
+    Options = [deleted, conflicts],
+    try
+        case Style of
+            main_only ->
+                {ok, Doc} = fabric2_db:open_doc(Db, DocId, Options),
+                [Doc];
+            all_docs ->
+                {ok, Docs} = fabric2_db:open_doc_revs(Db, DocId, all, Options),
+                [Doc || {ok, Doc} <- Docs]
+        end
+    catch _:_ ->
+        % We didn't log this before, should we now?
+        []
+    end.
 
 
 filter_revs(Passes, Docs) ->
@@ -471,12 +490,9 @@ get_changes_timeout(Args, Callback) ->
             fun(UserAcc) -> {ok, Callback(timeout, ResponseType, UserAcc)} end}
     end.
 
-start_sending_changes(_Callback, UserAcc, ResponseType)
-        when ResponseType =:= "continuous"
-        orelse ResponseType =:= "eventsource" ->
-    UserAcc;
-start_sending_changes(Callback, UserAcc, ResponseType) ->
-    Callback(start, ResponseType, UserAcc).
+start_sending_changes(Callback, UserAcc) ->
+    {_, NewUserAcc} = Callback(start, UserAcc),
+    NewUserAcc.
 
 build_acc(Args, Callback, UserAcc, Db, StartSeq, Prepend, Timeout, TimeoutFun, DDocName, ViewName, View) ->
     #changes_args{
@@ -525,7 +541,7 @@ send_changes(Acc, Dir, FirstRound) ->
                     couch_mrview:view_changes_since(View, StartSeq, DbEnumFun, [{dir, Dir}], Acc);
                 {undefined, _} ->
                     Opts = [{dir, Dir}],
-                    couch_db:fold_changes(Db, StartSeq, DbEnumFun, Acc, Opts);
+                    fabric2_db:fold_changes(Db, StartSeq, DbEnumFun, Acc, Opts);
                 {#mrview{}, _} ->
                     ViewEnumFun = fun view_changes_enumerator/2,
                     {Go, Acc0} = couch_mrview:view_changes_since(View, StartSeq, ViewEnumFun, [{dir, Dir}], Acc),
@@ -565,7 +581,7 @@ can_optimize(_, _) ->
 
 
 send_changes_doc_ids(Db, StartSeq, Dir, Fun, Acc0, {doc_ids, _Style, DocIds}) ->
-    Results = couch_db:get_full_doc_infos(Db, DocIds),
+    Results = fabric2_db:get_full_doc_infos(Db, DocIds),
     FullInfos = lists:foldl(fun
         (#full_doc_info{}=FDI, Acc) -> [FDI | Acc];
         (not_found, Acc) -> Acc
@@ -603,7 +619,21 @@ send_lookup_changes(FullDocInfos, StartSeq, Dir, Db, Fun, Acc0) ->
     SortedDocInfos = lists:keysort(#doc_info.high_seq, DocInfos),
     FinalAcc = try
         FoldFun(fun(DocInfo, Acc) ->
-            case Fun(DocInfo, Acc) of
+            % Kinda gross that we're munging this back to a map
+            % that will then have to re-read and rebuild the FDI
+            % for all_docs style. But c'est la vie.
+            #doc_info{
+                id = DocId,
+                high_seq = Seq,
+                revs = [#rev_info{rev = Rev, deleted = Deleted} | _]
+            } = DocInfo,
+            Change = #{
+                id => DocId,
+                sequence => Seq,
+                rev_id => Rev,
+                deleted => Deleted
+            },
+            case Fun(Change, Acc) of
                 {ok, NewAcc} ->
                     NewAcc;
                 {stop, NewAcc} ->
@@ -617,7 +647,7 @@ send_lookup_changes(FullDocInfos, StartSeq, Dir, Db, Fun, Acc0) ->
         fwd ->
             FinalAcc0 = case element(1, FinalAcc) of
                 changes_acc -> % we came here via couch_http or internal call
-                    FinalAcc#changes_acc{seq = couch_db:get_update_seq(Db)};
+                    FinalAcc#changes_acc{seq = fabric2_db:get_update_seq(Db)};
                 fabric_changes_acc -> % we came here via chttpd / fabric / rexi
                     FinalAcc#fabric_changes_acc{seq = couch_db:get_update_seq(Db)}
             end,
@@ -642,31 +672,34 @@ keep_sending_changes(Args, Acc0, FirstRound) ->
         ddoc_name = DDocName, view_name = ViewName
     } = ChangesAcc,
 
-    couch_db:close(Db),
     if Limit > NewLimit, ResponseType == "longpoll" ->
-        end_sending_changes(Callback, UserAcc2, EndSeq, ResponseType);
+        end_sending_changes(Callback, UserAcc2, EndSeq);
     true ->
-        case wait_updated(Timeout, TimeoutFun, UserAcc2) of
-        {updated, UserAcc4} ->
-            DbOptions1 = [{user_ctx, couch_db:get_user_ctx(Db)} | DbOptions],
-            case couch_db:open(couch_db:name(Db), DbOptions1) of
-            {ok, Db2} ->
-                ?MODULE:keep_sending_changes(
-                  Args#changes_args{limit=NewLimit},
-                  ChangesAcc#changes_acc{
-                    db = Db2,
-                    view = maybe_refresh_view(Db2, DDocName, ViewName),
-                    user_acc = UserAcc4,
-                    seq = EndSeq,
-                    prepend = Prepend2,
-                    timeout = Timeout,
-                    timeout_fun = TimeoutFun},
-                  false);
-            _Else ->
-                end_sending_changes(Callback, UserAcc2, EndSeq, ResponseType)
-            end;
-        {stop, UserAcc4} ->
-            end_sending_changes(Callback, UserAcc4, EndSeq, ResponseType)
+        {Go, UserAcc3} = notify_waiting_for_updates(Callback, UserAcc2),
+        if Go /= ok -> end_sending_changes(Callback, UserAcc3, EndSeq); true ->
+            case wait_updated(Timeout, TimeoutFun, UserAcc3) of
+            {updated, UserAcc4} ->
+                UserCtx = fabric2_db:get_user_ctx(Db),
+                DbOptions1 = [{user_ctx, UserCtx} | DbOptions],
+                case fabric2_db:open(fabric2_db:name(Db), DbOptions1) of
+                {ok, Db2} ->
+                    ?MODULE:keep_sending_changes(
+                      Args#changes_args{limit=NewLimit},
+                      ChangesAcc#changes_acc{
+                        db = Db2,
+                        view = maybe_refresh_view(Db2, DDocName, ViewName),
+                        user_acc = UserAcc4,
+                        seq = EndSeq,
+                        prepend = Prepend2,
+                        timeout = Timeout,
+                        timeout_fun = TimeoutFun},
+                      false);
+                _Else ->
+                    end_sending_changes(Callback, UserAcc3, EndSeq)
+                end;
+            {stop, UserAcc4} ->
+                end_sending_changes(Callback, UserAcc4, EndSeq)
+            end
         end
     end.
 
@@ -677,8 +710,11 @@ maybe_refresh_view(Db, DDocName, ViewName) ->
     {ok, {_, View, _}, _, _} = couch_mrview_util:get_view(DbName, DDocName, ViewName, #mrargs{}),
     View.
 
-end_sending_changes(Callback, UserAcc, EndSeq, ResponseType) ->
-    Callback({stop, EndSeq}, ResponseType, UserAcc).
+notify_waiting_for_updates(Callback, UserAcc) ->
+    Callback(waiting_for_updates, UserAcc).
+
+end_sending_changes(Callback, UserAcc, EndSeq) ->
+    Callback({stop, EndSeq, null}, UserAcc).
 
 view_changes_enumerator(Value, Acc) ->
     #changes_acc{
@@ -748,27 +784,24 @@ view_changes_enumerator(Value, Acc) ->
         end
     end.
 
-changes_enumerator(Value0, Acc) ->
+changes_enumerator(Change0, Acc) ->
     #changes_acc{
-        filter = Filter, callback = Callback, prepend = Prepend,
-        user_acc = UserAcc, limit = Limit, resp_type = ResponseType, db = Db,
-        timeout = Timeout, timeout_fun = TimeoutFun
+        filter = Filter,
+        callback = Callback,
+        user_acc = UserAcc,
+        limit = Limit,
+        db = Db,
+        timeout = Timeout,
+        timeout_fun = TimeoutFun
     } = Acc,
-    {Value, Results0} = case Filter of
+    {Change1, Results0} = case Filter of
         {fast_view, _, _, _} ->
-            fast_view_filter(Db, Value0, Filter);
+            fast_view_filter(Db, Change0, Filter);
         _ ->
-            {Value0, filter(Db, Value0, Filter)}
+            {Change0, filter(Db, Change0, Filter)}
     end,
     Results = [Result || Result <- Results0, Result /= null],
-    Seq = case Value of
-        #full_doc_info{} ->
-            Value#full_doc_info.update_seq;
-        #doc_info{} ->
-            Value#doc_info.high_seq;
-        {{Seq0, _}, _} ->
-            Seq0
-    end,
+    Seq = maps:get(sequence, Change1),
     Go = if (Limit =< 1) andalso Results =/= [] -> stop; true -> ok end,
     case Results of
     [] ->
@@ -780,19 +813,19 @@ changes_enumerator(Value0, Acc) ->
             {Go, Acc#changes_acc{seq = Seq, user_acc = UserAcc2}}
         end;
     _ ->
-        if ResponseType =:= "continuous" orelse ResponseType =:= "eventsource" ->
-            ChangesRow = changes_row(Results, Value, Acc),
-            UserAcc2 = Callback({change, ChangesRow, <<>>}, ResponseType, UserAcc),
-            reset_heartbeat(),
-            {Go, Acc#changes_acc{seq = Seq, user_acc = UserAcc2, limit = Limit - 1}};
-        true ->
-            ChangesRow = changes_row(Results, Value, Acc),
-            UserAcc2 = Callback({change, ChangesRow, Prepend}, ResponseType, UserAcc),
-            reset_heartbeat(),
-            {Go, Acc#changes_acc{
-                seq = Seq, prepend = <<",\n">>,
-                user_acc = UserAcc2, limit = Limit - 1}}
-        end
+        ChangesRow = changes_row(Results, Change1, Acc),
+        {UserGo, UserAcc2} = Callback({change, ChangesRow}, UserAcc),
+        RealGo = case UserGo of
+            ok -> Go;
+            stop -> stop
+        end,
+        reset_heartbeat(),
+        couch_log:error("XKCD: CHANGE SEQ: ~p", [Seq]),
+        {RealGo, Acc#changes_acc{
+            seq = Seq,
+            user_acc = UserAcc2,
+            limit = Limit - 1
+        }}
     end.
 
 
@@ -823,14 +856,17 @@ view_changes_row(Results, KVs, Acc) ->
     ] ++ maybe_get_changes_doc({Id, Rev}, Acc)}.
 
 
-changes_row(Results, #full_doc_info{} = FDI, Acc) ->
-    changes_row(Results, couch_doc:to_doc_info(FDI), Acc);
-changes_row(Results, DocInfo, Acc) ->
-    #doc_info{
-        id = Id, high_seq = Seq, revs = [#rev_info{deleted = Del} | _]
-    } = DocInfo,
-    {[{<<"seq">>, Seq}, {<<"id">>, Id}, {<<"changes">>, Results}] ++
-        deleted_item(Del) ++ maybe_get_changes_doc(DocInfo, Acc)}.
+changes_row(Results, Change, Acc) ->
+    #{
+        id := Id,
+        sequence := Seq,
+        deleted := Del
+    } = Change,
+    {[
+        {<<"seq">>, Seq},
+        {<<"id">>, Id},
+        {<<"changes">>, Results}
+    ] ++ deleted_item(Del) ++ maybe_get_changes_doc(Change, Acc)}.
 
 maybe_get_changes_doc(Value, #changes_acc{include_docs=true}=Acc) ->
     #changes_acc{
@@ -840,9 +876,9 @@ maybe_get_changes_doc(Value, #changes_acc{include_docs=true}=Acc) ->
         filter = Filter
     } = Acc,
     Opts = case Conflicts of
-               true -> [deleted, conflicts];
-               false -> [deleted]
-           end,
+        true -> [deleted, conflicts];
+        false -> [deleted]
+    end,
     load_doc(Db, Value, Opts, DocOpts, Filter);
 
 maybe_get_changes_doc(_Value, _Acc) ->
@@ -850,11 +886,24 @@ maybe_get_changes_doc(_Value, _Acc) ->
 
 
 load_doc(Db, Value, Opts, DocOpts, Filter) ->
-    case couch_index_util:load_doc(Db, Value, Opts) of
+    case load_doc(Db, Value, Opts) of
         null ->
             [{doc, null}];
         Doc ->
             [{doc, doc_to_json(Doc, DocOpts, Filter)}]
+    end.
+
+
+load_doc(Db, Change, Opts) ->
+    #{
+        id := Id,
+        rev_id := RevId
+    } = Change,
+    case fabric2_db:open_doc_revs(Db, Id, [RevId], Opts) of
+        {ok, [{ok, Doc}]} ->
+            Doc;
+        _ ->
+            null
     end.
 
 
@@ -870,17 +919,22 @@ deleted_item(_) -> [].
 
 % waits for a updated msg, if there are multiple msgs, collects them.
 wait_updated(Timeout, TimeoutFun, UserAcc) ->
+    couch_log:error("XKCD: WAITING FOR UPDATE", []),
     receive
     updated ->
+        couch_log:error("XKCD: GOT UPDATED", []),
         get_rest_updated(UserAcc);
     deleted ->
+        couch_log:error("XKCD: DB DELETED", []),
         {stop, UserAcc}
     after Timeout ->
         {Go, UserAcc2} = TimeoutFun(UserAcc),
         case Go of
         ok ->
+            couch_log:error("XKCD: WAIT UPDATED TIMEOUT, RETRY", []),
             ?MODULE:wait_updated(Timeout, TimeoutFun, UserAcc2);
         stop ->
+            couch_log:error("XKCD: WAIT UPDATED TIMEOUT STOP", []),
             {stop, UserAcc2}
         end
     end.

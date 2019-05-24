@@ -98,6 +98,7 @@ process_change(#doc_info{id = Id} = DocInfo, {Parent, Db, ChangesQueue, _}) ->
             Stats = couch_replicator_stats:new([{doc_write_failures, 1}]),
             ok = gen_server:call(Parent, {add_stats, Stats}, infinity);
         false ->
+            couch_log:error("XKCD: REPL CHANGE: ~p", [DocInfo#doc_info.high_seq]),
             ok = couch_work_queue:queue(ChangesQueue, DocInfo),
             put(last_seq, DocInfo#doc_info.high_seq)
     end;

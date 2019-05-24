@@ -70,9 +70,9 @@
     open_doc/3,
     open_doc_revs/4,
     %% open_doc_int/3,
-    %% get_doc_info/2,
-    %% get_full_doc_info/2,
-    %% get_full_doc_infos/2,
+    get_doc_info/2,
+    get_full_doc_info/2,
+    get_full_doc_infos/2,
     get_missing_revs/2,
     %% get_design_doc/2,
     %% get_design_docs/1,
@@ -94,10 +94,8 @@
     %% purge_docs/2,
     %% purge_docs/3,
 
-    %% with_stream/3,
-    %% open_write_stream/2,
-    %% open_read_stream/2,
-    %% is_active_stream/2,
+    read_attachment/3,
+    write_attachment/3,
 
     fold_docs/3,
     fold_docs/4,
@@ -461,7 +459,43 @@ open_doc_revs(Db, DocId, Revs, Options) ->
     end).
 
 
-get_missing_revs(Db, IdRevs) ->
+get_doc_info(Db, DocId) ->
+    case get_full_doc_info(Db, DocId) of
+        not_found -> not_found;
+        FDI -> couch_doc:to_doc_info(FDI)
+    end.
+
+
+get_full_doc_info(Db, DocId) ->
+    RevInfos = fabric2_fdb:transactional(Db, fun(TxDb) ->
+        fabric2_fdb:get_all_revs(TxDb, DocId)
+    end),
+    if RevInfos == [] -> not_found; true ->
+        #{winner := true} = Winner = lists:last(RevInfos),
+        RevTree = lists:foldl(fun(RI, TreeAcc) ->
+            RIPath = fabric2_util:revinfo_to_path(RI),
+            {Merged, _} = couch_key_tree:merge(TreeAcc, RIPath),
+            Merged
+        end, [], RevInfos),
+        #full_doc_info{
+            id = DocId,
+            update_seq = fabric2_fdb:vs_to_seq(maps:get(sequence, Winner)),
+            deleted = maps:get(deleted, Winner),
+            rev_tree = RevTree
+        }
+    end.
+
+
+get_full_doc_infos(Db, DocIds) ->
+    fabric2_fdb:transactional(Db, fun(TxDb) ->
+        lists:map(fun(DocId) ->
+            get_full_doc_info(TxDb, DocId)
+        end, DocIds)
+    end).
+
+
+get_missing_revs(Db, JsonIdRevs) ->
+    IdRevs = [idrevs(IdR) || IdR <- JsonIdRevs],
     AllRevInfos = fabric2_fdb:transactional(Db, fun(TxDb) ->
         lists:foldl(fun({Id, _Revs}, Acc) ->
             case maps:is_key(Id, Acc) of
@@ -540,6 +574,20 @@ update_docs(Db, Docs, Options) ->
         false -> Resps0
     end,
     {Status, Resps1}.
+
+
+read_attachment(Db, DocId, AttId) ->
+    fabric2_fdb:transactional(Db, fun(TxDb) ->
+        fabric2_fdb:read_attachment(TxDb, DocId, AttId)
+    end).
+
+
+write_attachment(Db, DocId, Att) ->
+    Data = couch_att:fetch(data, Att),
+    {ok, AttId} = fabric2_fdb:transactional(Db, fun(TxDb) ->
+        fabric2_fdb:write_attachment(TxDb, DocId, Data)
+    end),
+    couch_att:store(data, {loc, Db, DocId, AttId}, Att).
 
 
 fold_docs(Db, UserFun, UserAcc) ->
@@ -718,8 +766,8 @@ apply_open_doc_opts(Doc, Revs, Options) ->
     end,
 
     Meta4 = if not IncludeLocalSeq -> []; true ->
-        #{winner := true, sequence := Seq} = lists:last(Revs),
-        [{local_seq, erlfdb_tuple:pack({Seq})}]
+        #{winner := true, sequence := SeqVS} = lists:last(Revs),
+        [{local_seq, fabric2_fdb:vs_to_seq(SeqVS)}]
     end,
 
     case Doc#doc.deleted and not ReturnDeleted of
@@ -907,6 +955,8 @@ update_doc_interactive(Db, Doc0, Future, _Options) ->
         revs = {NewRevPos, [NewRev | NewRevPath]}
     } = Doc3 = new_revid(Doc2),
 
+    Doc4 = update_attachment_revpos(Doc3),
+
     NewRevInfo = #{
         winner => undefined,
         deleted => NewDeleted,
@@ -918,9 +968,9 @@ update_doc_interactive(Db, Doc0, Future, _Options) ->
 
     % Gather the list of possible winnig revisions
     Possible = case Target == Winner of
-        true when not Doc3#doc.deleted ->
+        true when not Doc4#doc.deleted ->
             [NewRevInfo];
-        true when Doc3#doc.deleted ->
+        true when Doc4#doc.deleted ->
             case SecondPlace of
                 #{} -> [NewRevInfo, SecondPlace];
                 not_found -> [NewRevInfo]
@@ -945,7 +995,7 @@ update_doc_interactive(Db, Doc0, Future, _Options) ->
 
     ok = fabric2_fdb:write_doc(
             Db,
-            Doc3,
+            Doc4,
             NewWinner,
             Winner,
             ToUpdate,
@@ -1049,6 +1099,21 @@ update_local_doc(Db, Doc0, _Options) ->
     {ok, {0, integer_to_binary(Rev)}}.
 
 
+update_attachment_revpos(#doc{revs = {RevPos, _Revs}, atts = Atts0} = Doc) ->
+    Atts = lists:map(fun(Att) ->
+        case couch_att:fetch(data, Att) of
+            {loc, _Db, _DocId, _AttId} ->
+                % Attachment was already on disk
+                Att;
+            _ ->
+                % We will write this attachment with this update
+                % so mark it with the RevPos that will be written
+                couch_att:store(revpos, RevPos, Att)
+        end
+    end, Atts0),
+    Doc#doc{atts = Atts}.
+
+
 get_winning_rev_futures(Db, Docs) ->
     lists:foldl(fun(Doc, Acc) ->
         #doc{
@@ -1068,29 +1133,30 @@ get_winning_rev_futures(Db, Docs) ->
     end, #{}, Docs).
 
 
-prep_and_validate(Db, Doc, PrevRevInfo) ->
-    HasStubs = couch_doc:has_stubs(Doc),
+prep_and_validate(Db, NewDoc, PrevRevInfo) ->
+    HasStubs = couch_doc:has_stubs(NewDoc),
     HasVDUs = [] /= maps:get(validate_doc_update_funs, Db),
-    IsDDoc = case Doc#doc.id of
+    IsDDoc = case NewDoc#doc.id of
         <<?DESIGN_DOC_PREFIX, _/binary>> -> true;
         _ -> false
     end,
 
     PrevDoc = case HasStubs orelse (HasVDUs and not IsDDoc) of
         true when PrevRevInfo /= not_found ->
-            case fabric2_fdb:get_doc_body(Db, Doc#doc.id, PrevRevInfo) of
-                #doc{} = Doc -> Doc;
+            case fabric2_fdb:get_doc_body(Db, NewDoc#doc.id, PrevRevInfo) of
+                #doc{} = PDoc -> PDoc;
                 {not_found, _} -> nil
             end;
         _ ->
             nil
     end,
 
-    MergedDoc = if not HasStubs -> Doc; true ->
+    MergedDoc = if not HasStubs -> NewDoc; true ->
         % This will throw an error if we have any
         % attachment stubs missing data
-        couch_doc:merge_stubs(Doc, PrevDoc)
+        couch_doc:merge_stubs(NewDoc, PrevDoc)
     end,
+    check_duplicate_attachments(MergedDoc),
     validate_doc_update(Db, MergedDoc, PrevDoc),
     MergedDoc.
 
@@ -1140,6 +1206,16 @@ validate_ddoc(Db, DDoc) ->
     end.
 
 
+check_duplicate_attachments(#doc{atts = Atts}) ->
+    lists:foldl(fun(Att, Names) ->
+        Name = couch_att:fetch(name, Att),
+        case ordsets:is_element(Name, Names) of
+            true -> throw({bad_request, <<"Duplicate attachments">>});
+            false -> ordsets:add_element(Name, Names)
+        end
+    end, ordsets:new(), Atts).
+
+
 get_leaf_path(Pos, Rev, [{Pos, [{Rev, _RevInfo} | LeafPath]} | _]) ->
     LeafPath;
 get_leaf_path(Pos, Rev, [_WrongLeaf | RestLeafs]) ->
@@ -1187,3 +1263,20 @@ tag_docs([#doc{meta = Meta} = Doc | Rest]) ->
 
 doc_tag(#doc{meta = Meta}) ->
     fabric2_util:get_value(ref, Meta).
+
+
+idrevs({Id, Revs}) when is_list(Revs) ->
+    {docid(Id), [rev(R) || R <- Revs]}.
+
+
+docid(DocId) when is_list(DocId) ->
+    list_to_binary(DocId);
+docid(DocId) ->
+    DocId.
+
+
+rev(Rev) when is_list(Rev); is_binary(Rev) ->
+    couch_doc:parse_rev(Rev);
+rev({Seq, Hash} = Rev) when is_integer(Seq), is_binary(Hash) ->
+    Rev.
+

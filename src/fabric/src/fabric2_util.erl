@@ -17,7 +17,6 @@
     revinfo_to_path/1,
     sort_revinfos/1,
 
-    seq_zero/0,
     seq_zero_vs/0,
     seq_max_vs/0,
 
@@ -64,10 +63,6 @@ rev_sort_key(#{} = RevInfo) ->
         rev_id := {RevPos, Rev}
     } = RevInfo,
     {not Deleted, RevPos, Rev}.
-
-
-seq_zero() ->
-    <<0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0>>.
 
 
 seq_zero_vs() ->

@@ -53,6 +53,7 @@ doc_crud_test_() ->
                 fun open_doc_revs_all/1,
                 fun open_doc_revs_latest/1,
                 fun get_missing_revs_basic/1,
+                fun get_missing_revs_on_missing_doc/1,
                 fun open_missing_local_doc/1,
                 fun create_local_doc_basic/1,
                 fun update_local_doc_basic/1,
@@ -613,6 +614,20 @@ get_missing_revs_basic({Db, _}) ->
             {ok, [{DocId, [MissingWithAncestors], PossibleAncestors}]},
             fabric2_db:get_missing_revs(Db, [{DocId, [MissingWithAncestors]}])
         ).
+
+
+get_missing_revs_on_missing_doc({Db, _}) ->
+    Revs = lists:sort([
+            couch_doc:rev_to_str({1, fabric2_util:uuid()}),
+            couch_doc:rev_to_str({2, fabric2_util:uuid()}),
+            couch_doc:rev_to_str({800, fabric2_util:uuid()})
+        ]),
+    DocId = fabric2_util:uuid(),
+    {ok, Resp} = fabric2_db:get_missing_revs(Db, [{DocId, Revs}]),
+    ?assertMatch([{DocId, [_ | _], []}], Resp),
+    [{DocId, Missing, _}] = Resp,
+    MissingStrs = [couch_doc:rev_to_str(Rev) || Rev <- Missing],
+    ?assertEqual(Revs, lists:sort(MissingStrs)).
 
 
 open_missing_local_doc({Db, _}) ->
