@@ -28,11 +28,16 @@
 
 % Prefix Definitions
 
+% Layer Level: (LayerPrefix, X, ...)
+
 -define(CLUSTER_CONFIG, 0).
 -define(ALL_DBS, 1).
 -define(DBS, 15).
 -define(TX_IDS, 255).
 
+% Database Level: (LayerPrefix, ?DBS, DbPrefix, X, ...)
+
+-define(DB_VERSION, 0).
 -define(DB_CONFIG, 16).
 -define(DB_STATS, 17).
 -define(DB_ALL_DOCS, 18).

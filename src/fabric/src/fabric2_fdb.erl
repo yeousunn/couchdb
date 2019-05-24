@@ -118,6 +118,16 @@ create(#{} = Db0, Options) ->
     DbPrefix = erlfdb_tuple:pack({?DBS, DbName}, LayerPrefix),
     erlfdb:set(Tx, DbKey, DbPrefix),
 
+    % This key is responsible for telling us when something in
+    % the database cache (i.e., fabric2_server's ets table) has
+    % changed and requires re-loading. This currently includes
+    % revs_limit and validate_doc_update functions. There's
+    % no order to versioning here. Its just a value that changes
+    % that is used in the ensure_current check.
+    DbVersionKey = erlfdb_tuple:pack({?DB_VERSION}, DbPrefix),
+    DbVersion = fabric2_util:uuid(),
+    erlfdb:set(Tx, DbVersionKey, DbVersion),
+
     UUID = fabric2_util:uuid(),
 
     Defaults = [
@@ -140,6 +150,7 @@ create(#{} = Db0, Options) ->
     Db#{
         uuid => UUID,
         db_prefix => DbPrefix,
+        db_version => DbVersion,
 
         revs_limit => 1000,
         security_doc => {[]},
@@ -167,10 +178,14 @@ open(#{} = Db0, Options) ->
         not_found -> erlang:error(database_does_not_exist)
     end,
 
+    DbVersionKey = erlfdb_tuple:pack({?DB_VERSION}, DbPrefix),
+    DbVersion = erlfdb:wait(erlfdb:get(Tx, DbVersionKey)),
+
     UserCtx = fabric2_util:get_value(user_ctx, Options, #user_ctx{}),
 
     Db2 = Db1#{
         db_prefix => DbPrefix,
+        db_version => DbVersion,
 
         revs_limit => 1000,
         security_doc => {[]},
@@ -989,12 +1004,21 @@ ensure_current(#{} = Db) ->
 
     #{
         tx := Tx,
-        md_version := MetaDataVersion
+        md_version := MetaDataVersion,
+        db_prefix := DbPrefix,
+        db_version := DbVersion
     } = Db,
 
     case erlfdb:wait(erlfdb:get(Tx, ?METADATA_VERSION_KEY)) of
         MetaDataVersion -> Db;
         _NewVersion -> reopen(Db)
+    end,
+
+    DbVersionKey = erlfdb:tuple_pack({?DB_VERSION}, DbPrefix),
+
+    case erlfdb:wait(erlfdb:get(Tx, DbVersionKey)) of
+        DbVersion -> Db;
+        _NewDBVersion -> reopen(Db)
     end.
 
 
