@@ -218,6 +218,7 @@ install_local_rebar() {
     if [ ! -x "${rootdir}/bin/rebar" ]; then
         if [ ! -d "${rootdir}/src/rebar" ]; then
             git clone https://github.com/apache/couchdb-rebar.git ${rootdir}/src/rebar
+            cd ${rootdir}/src/rebar
             git checkout eunit-timeout
         fi
         make -C ${rootdir}/src/rebar
