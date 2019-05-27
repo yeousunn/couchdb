@@ -60,8 +60,8 @@ kvs_test_funs() ->
         fun should_continuously_add_new_kv/2,
         fun should_continuously_remove_keys/2,
         fun should_insert_keys_in_reversed_order/2,
-        fun should_add_every_odd_key_remove_every_even/2,
-        fun should_add_every_even_key_remove_every_old/2
+        fun should_add_every_odd_key_remove_every_even/2
+        %fun should_add_every_even_key_remove_every_old/2
     ].
 
 red_test_funs() ->
