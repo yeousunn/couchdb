@@ -537,6 +537,8 @@ update_doc(Db, Doc, Options) ->
             {ok, NewRev};
         {ok, [{{_Id, _Rev}, Error}]} ->
             throw(Error);
+        {error, [{{_Id, _Rev}, Error}]} ->
+            throw(Error);
         {error, [Error]} ->
             throw(Error);
         {ok, []} ->
@@ -569,9 +571,13 @@ update_docs(Db, Docs, Options) ->
             {#doc{} = Doc, Error} ->
                 #doc{
                     id = DocId,
-                    revs = {RevPos, [Rev | _]}
+                    revs = Revs
                 } = Doc,
-                {{DocId, {RevPos, Rev}}, Error};
+                RevId = case Revs of
+                    {RevPos, [Rev | _]} -> {RevPos, Rev};
+                    {0, []} -> {0, <<>>}
+                end,
+                {{DocId, RevId}, Error};
             Else ->
                 Else
         end
