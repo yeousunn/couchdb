@@ -40,7 +40,7 @@
 -define(UNDEFINED_MAX_SCHEDULED_TIME, 1 bsl 36).
 
 
--type jtx() :: map().
+-type jtx() :: map() | undefined | tuple().
 -type job_id() :: binary().
 -type job_type() :: tuple() | binary() | non_neg_integer().
 -type job() :: map().

@@ -16,12 +16,11 @@
 -export([
     add/5,
     remove/2,
-    resubmit/3,
-
     get_job_state_and_data/2,
 
     accept/3,
     finish/3,
+    resubmit/3,
     update/3,
 
     set_type_timeout/3,
@@ -44,7 +43,6 @@
     get_jtx/1,
     tx/2,
 
-    accept/2,
     get_job/2,
     get_jobs/0,
     clear_jobs/0
@@ -84,11 +82,11 @@ add(#{jtx := true} = JTx0, Type, JobId, Data, STime) ->
             Key = job_key(JTx, Job),
             case erlfdb:wait(erlfdb:get(Tx, Key)) of
                 <<_/binary>> ->
-                    {error, duplicate_job};
+                    {ok, _} = resubmit(JTx, Job, STime),
+                    ok;
                 not_found ->
-                    try maybe_enqueue(JTx, Type, JobId, STime, true, Data) of
-                        ok ->
-                            {ok, Job}
+                    try
+                        maybe_enqueue(JTx, Type, JobId, STime, true, Data)
                     catch
                         error:{json_encoding_error, Error} ->
                             {error, {json_encoding_error, Error}}
@@ -106,23 +104,6 @@ remove(#{jtx := true} = JTx0, #{job := true} = Job) ->
             couch_jobs_pending:remove(JTx, Type, JobId, STime),
             erlfdb:clear(Tx, Key),
             ok;
-        not_found ->
-            {error, not_found}
-    end.
-
-
-resubmit(#{jtx := true} = JTx0, #{job := true} = Job, NewSTime) ->
-    #{tx := Tx} = JTx = get_jtx(JTx0),
-    Key = job_key(JTx, Job),
-    case get_job_val(Tx, Key) of
-        #jv{stime = OldSTime} = JV0 ->
-            STime = case NewSTime =:= undefined of
-                true -> OldSTime;
-                false -> NewSTime
-            end,
-            JV = JV0#jv{stime = STime, resubmit = true},
-            set_job_val(Tx, Key, JV),
-            {ok, Job#{resubmit => true, stime => STime}};
         not_found ->
             {error, not_found}
     end.
@@ -182,6 +163,36 @@ finish(#{jtx := true} = JTx0, #{jlock := <<_/binary>>} = Job, Data) when
             end;
         halt ->
             {error, halt}
+    end.
+
+
+resubmit(#{jtx := true} = JTx0, #{job := true} = Job, NewSTime) ->
+    #{tx := Tx} = JTx = get_jtx(JTx0),
+    #{type := Type, id := JobId} = Job,
+    Key = job_key(JTx, Job),
+    case get_job_val(Tx, Key) of
+        #jv{seq = Seq, jlock = JLock, stime = OldSTime, data = Data} = JV ->
+            STime = case NewSTime =:= undefined of
+                true -> OldSTime;
+                false -> NewSTime
+            end,
+            case job_state(JLock, Seq) of
+                finished ->
+                    ok = maybe_enqueue(JTx, Type, JobId, STime, true, Data),
+                    {ok, Job};
+                pending ->
+                    JV1 = JV#jv{seq = ?UNSET_VS, stime = STime},
+                    set_job_val(Tx, Key, JV1),
+                    couch_jobs_pending:remove(JTx, Type, JobId, OldSTime),
+                    couch_jobs_pending:enqueue(JTx, Type, STime, JobId),
+                    {ok, Job#{stime => STime}};
+                running ->
+                    JV1 = JV#jv{stime = STime, resubmit = true},
+                    set_job_val(Tx, Key, JV1),
+                    {ok, Job#{resubmit => true, stime => STime}}
+            end;
+        not_found ->
+            {error, not_found}
     end.
 
 
@@ -378,23 +389,6 @@ tx(#{jtx := true} = JTx, Fun) when is_function(Fun, 1) ->
 
 
 % Debug and testing API
-
-accept(Type, MaxSTime) ->
-    fabric2_fdb:transactional(fun(Tx) ->
-        case accept(init_jtx(Tx), Type, MaxSTime) of
-            {ok, Job} ->
-                {ok, Job};
-            {not_found, PendingWatch} ->
-                erlfdb:cancel(PendingWatch),
-                receive
-                    {Ref, ready} when is_reference(Ref) -> ok
-                after
-                    0 -> ok
-                end,
-                {error, not_found}
-        end
-    end).
-
 
 get_job(Type, JobId) ->
     fabric2_fdb:transactional(fun(Tx) ->

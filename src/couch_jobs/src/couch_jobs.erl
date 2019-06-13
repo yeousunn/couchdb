@@ -14,12 +14,11 @@
 
 -export([
     % Job creation
-    add/3,
     add/4,
-    remove/1,
-    resubmit/1,
-    get_job_data/1,
-    get_job_state/1,
+    add/5,
+    remove/3,
+    get_job_data/3,
+    get_job_state/3,
 
     % Job processing
     accept/1,
@@ -33,7 +32,6 @@
     update/3,
 
     % Subscriptions
-    subscribe/1,
     subscribe/2,
     unsubscribe/1,
     wait/2,
@@ -54,38 +52,32 @@
 
 %% Job Creation API
 
--spec add(job_type(), job_id(), job_data()) -> {ok, job()} | {error, any()}.
-add(Type, JobId, JobData) ->
-    add(Type, JobId, JobData, 0).
+-spec add(jtx(), job_type(), job_id(), job_data()) -> ok | {error, any()}.
+add(Tx, Type, JobId, JobData) ->
+    add(Tx, Type, JobId, JobData, 0).
 
 
--spec add(job_type(), job_id(), job_data(), scheduled_time()) ->
+-spec add(jtx(), job_type(), job_id(), job_data(), scheduled_time()) ->
     ok | {error, any()}.
-add(Type, JobId, JobData, ScheduledTime) when is_map(JobData),
+add(Tx, Type, JobId, JobData, ScheduledTime) when is_map(JobData),
         is_integer(ScheduledTime) ->
-    couch_jobs_fdb:tx(couch_jobs_fdb:get_jtx(), fun(JTx) ->
+    couch_jobs_fdb:tx(couch_jobs_fdb:get_jtx(Tx), fun(JTx) ->
         couch_jobs_fdb:add(JTx, Type, JobId, JobData, ScheduledTime)
     end).
 
 
--spec remove(job()) -> ok | {error, any()}.
-remove(#{job := true} = Job) ->
-    couch_jobs_fdb:tx(couch_jobs_fdb:get_jtx(), fun(JTx) ->
-        couch_jobs_fdb:remove(JTx, Job)
+-spec remove(jtx(), job_type(), job_id()) -> ok | {error, any()}.
+remove(Tx, Type, JobId) ->
+    couch_jobs_fdb:tx(couch_jobs_fdb:get_jtx(Tx), fun(JTx) ->
+        couch_jobs_fdb:remove(JTx, job(Type, JobId))
     end).
 
 
--spec resubmit(job()) -> {ok, job()} | {error, any()}.
-resubmit(#{job := true} = Job) ->
-    couch_jobs_fdb:tx(couch_jobs_fdb:get_jtx(), fun(JTx) ->
-        couch_jobs_fdb:resubmit(JTx, Job, undefined)
-    end).
-
-
--spec get_job_data(job()) -> {ok, job_data()} | {error, any()}.
-get_job_data(#{job := true} = Job) ->
-    couch_jobs_fdb:tx(couch_jobs_fdb:get_jtx(), fun(JTx) ->
-        case couch_jobs_fdb:get_job_state_and_data(JTx, Job) of
+-spec get_job_data(jtx(), job_type(), job_id()) -> {ok, job_data()} | {error,
+    any()}.
+get_job_data(Tx, Type, JobId) ->
+    couch_jobs_fdb:tx(couch_jobs_fdb:get_jtx(Tx), fun(JTx) ->
+        case couch_jobs_fdb:get_job_state_and_data(JTx, job(Type, JobId)) of
             {ok, _Seq, _State, Data} ->
                 {ok, couch_jobs_fdb:decode_data(Data)};
             {error, Error} ->
@@ -94,10 +86,11 @@ get_job_data(#{job := true} = Job) ->
     end).
 
 
--spec get_job_state(job()) -> {ok, job_state()} | {error, any()}.
-get_job_state(#{job := true} = Job) ->
-    couch_jobs_fdb:tx(couch_jobs_fdb:get_jtx(), fun(JTx) ->
-        case couch_jobs_fdb:get_job_state_and_data(JTx, Job) of
+-spec get_job_state(jtx(), job_type(), job_id()) -> {ok, job_state()} | {error,
+    any()}.
+get_job_state(Tx, Type, JobId) ->
+    couch_jobs_fdb:tx(couch_jobs_fdb:get_jtx(Tx), fun(JTx) ->
+        case couch_jobs_fdb:get_job_state_and_data(JTx, job(Type, JobId)) of
             {ok, _Seq, State, _Data} ->
                 {ok, State};
             {error, Error} ->
@@ -175,11 +168,6 @@ update(Tx, #{jlock := <<_/binary>>} = Job, JobData) ->
 % Receive events as messages. Wait for them using `wait/2,3`
 % functions.
 %
--spec subscribe(job()) ->  {ok, job_subscription(), job_state()}
-    | {ok, finished} | {error, any()}.
-subscribe(#{job := true, type := Type, id := JobId}) ->
-    subscribe(Type, JobId).
-
 
 -spec subscribe(job_type(), job_id()) -> {ok, job_subscription(), job_state()}
     | {ok, finished} | {error, any()}.
@@ -274,6 +262,10 @@ get_type_timeout(Type) ->
 
 
 %% Private utilities
+
+job(Type, JobId) ->
+    #{job => true, type => Type, id => JobId}.
+
 
 wait_pending(PendingWatch, MaxSTime) ->
     NowMSec = erlang:system_time(millisecond),
