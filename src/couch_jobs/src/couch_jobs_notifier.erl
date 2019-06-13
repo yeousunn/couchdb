@@ -151,6 +151,9 @@ get_type_vs(#st{jtx = JTx, type = Type}) ->
 % and updated at least once since the given versionstamp. These are relatively
 % cheap to find as it's just a range read in the ?ACTIVITY subspace.
 %
+get_active_since(#st{} = _St, not_found, _SubscribedJobs) ->
+    [];
+
 get_active_since(#st{jtx = JTx, type = Type}, VS, SubscribedJobs) ->
     AllUpdatedSet = sets:from_list(couch_jobs_fdb:tx(JTx, fun(JTx1) ->
         couch_jobs_fdb:get_active_since(JTx1, Type, VS)
