@@ -89,6 +89,7 @@ handle_call({subscribe, JobId, Pid}, _From, #st{} = St) ->
 
 handle_call({unsubscribe, Ref}, _From, #st{subs = Subs} = St) ->
     true = ets:match_delete(Subs, {{'$1', Ref}, '_'}),
+    erlang:demonitor(Ref, [flush]),
     {reply, ok, St};
 
 handle_call({type_updated, VS}, _From, St) ->
