@@ -65,6 +65,7 @@ init(_) ->
     reset_monitors(),
     reset_notifiers(),
     ets:new(?MODULE, [protected, named_table]),
+    check_types(),
     schedule_check(),
     {ok, nil}.
 
