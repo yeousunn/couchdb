@@ -53,7 +53,8 @@ couch_jobs_basic_test_() ->
                     fun subscribe_wait_multiple/1,
                     fun enqueue_inactive/1,
                     fun remove_running_job/1,
-                    fun check_get_jobs/1
+                    fun check_get_jobs/1,
+                    fun use_fabric_transaction_object/1
                 ]
             }
         }
@@ -83,13 +84,19 @@ setup() ->
         t2 => T2,
         t1_timeout => T1Timeout,
         j1 => <<"j1">>,
-        j2 => <<"j2">>
+        j2 => <<"j2">>,
+        dbname => ?tempdb()
     }.
 
 
-teardown(#{}) ->
+teardown(#{dbname := DbName}) ->
     application:stop(couch_jobs),
     couch_jobs_fdb:clear_jobs(),
+    AllDbs = fabric2_db:list_dbs(),
+    case lists:member(DbName, AllDbs) of
+        true -> ok = fabric2_db:delete(DbName, []);
+        false -> ok
+    end,
     meck:unload().
 
 
@@ -550,4 +557,23 @@ check_get_jobs(#{t1 := T1, j1 := J1, t2 := T2, j2 := J2}) ->
             {T2, J2, pending, #{}},
             {T1, J1, running, #{}}
         ], lists:sort(couch_jobs_fdb:get_jobs()))
+    end).
+
+
+use_fabric_transaction_object(#{t1 := T1, j1 := J1, dbname := DbName}) ->
+    ?_test(begin
+        {ok, Db} = fabric2_db:create(DbName, []),
+        ?assertEqual(ok, couch_jobs:add(Db, T1, J1, #{})),
+        ?assertMatch(#{state := pending, data := #{}}, get_job(T1, J1)),
+        {ok, Job} = couch_jobs:accept(T1),
+        ?assertEqual(ok, fabric2_fdb:transactional(Db, fun(Db1) ->
+            {ok, #{}} = couch_jobs:get_job_data(Db1, T1, J1),
+            Doc1 = #doc{id = <<"1">>, body = {[]}},
+            {ok, {_, _}} = fabric2_db:update_doc(Db1, Doc1),
+            Doc2 = #doc{id = <<"2">>, body = {[]}},
+            {ok, {_, _}} = fabric2_db:update_doc(Db1, Doc2),
+            couch_jobs:finish(Db1, Job, #{<<"d">> => 1})
+        end)),
+        ok = couch_jobs:remove(#{tx => undefined}, T1, J1),
+        ok = fabric2_db:delete(DbName, [])
     end).
