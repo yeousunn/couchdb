@@ -576,11 +576,22 @@ init_jtx({erlfdb_transaction, _} = Tx) ->
     }.
 
 
-ensure_current(#{jtx := true, tx := Tx, md_version := Version} = JTx) ->
-    case erlfdb:wait(erlfdb:get(Tx, ?METADATA_VERSION_KEY)) of
-        Version -> JTx;
-        _NewVersion -> update_jtx_cache(init_jtx(Tx))
+ensure_current(#{jtx := true, tx := Tx} = JTx) ->
+    case get(?COUCH_JOBS_CURRENT) of
+        Tx ->
+            JTx;
+        _ ->
+            JTx1 = update_current(JTx),
+            put(?COUCH_JOBS_CURRENT, Tx),
+            JTx1
     end.
+
+
+update_current(#{tx := Tx, md_version := Version} = JTx) ->
+  case erlfdb:wait(erlfdb:get(Tx, ?METADATA_VERSION_KEY)) of
+      Version -> JTx;
+      _NewVersion -> update_jtx_cache(init_jtx(Tx))
+  end.
 
 
 update_jtx_cache(#{jtx := true} = JTx) ->

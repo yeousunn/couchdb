@@ -37,6 +37,7 @@
 
 
 -define(COUCH_JOBS_EVENT, '$couch_jobs_event').
+-define(COUCH_JOBS_CURRENT, '$couch_jobs_current').
 -define(UNDEFINED_MAX_SCHEDULED_TIME, 1 bsl 36).
 
 
