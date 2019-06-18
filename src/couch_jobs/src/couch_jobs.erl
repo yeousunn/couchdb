@@ -169,15 +169,20 @@ update(Tx, #{jlock := <<_/binary>>} = Job, JobData) ->
 % functions.
 %
 
--spec subscribe(job_type(), job_id()) -> {ok, job_subscription(), job_state()}
-    | {ok, finished} | {error, any()}.
+-spec subscribe(job_type(), job_id()) -> {ok, job_subscription(), job_state(),
+    job_data()} | {ok, finished, job_data()} | {error, any()}.
 subscribe(Type, JobId) ->
     case couch_jobs_server:get_notifier_server(Type) of
         {ok, Server} ->
             case couch_jobs_notifier:subscribe(Server, JobId, self()) of
-                {ok, finished} -> {ok, finished};
-                {error, not_found} -> {error, not_found};
-                {ok, {Ref, JobState}} -> {ok, {Server, Ref}, JobState}
+                {ok, finished, Data0} ->
+                    Data =  couch_jobs_fdb:decode_data(Data0),
+                    {ok, finished, Data};
+                {error, not_found} ->
+                    {error, not_found};
+                {ok, {Ref, State, Data0}} ->
+                    Data =  couch_jobs_fdb:decode_data(Data0),
+                    {ok, {Server, Ref}, State, Data}
             end;
         {error, Error} ->
             {error, Error}
@@ -201,37 +206,40 @@ unsubscribe({Server, Ref}) when is_pid(Server), is_reference(Ref) ->
 % Wait to receive job state updates
 %
 -spec wait(job_subscription() | [job_subscription()], timeout()) ->
-    {job_type(), job_id(), job_state()} | timeout.
-wait({_, Ref}, TimeoutMSec) ->
+    {job_type(), job_id(), job_state(), job_data()} | timeout.
+wait({_, Ref}, Timeout) ->
     receive
-        {?COUCH_JOBS_EVENT, Ref, Type, Id, State} ->
-            {Type, Id, State}
+        {?COUCH_JOBS_EVENT, Ref, Type, Id, State, Data} ->
+            {Type, Id, State, couch_jobs_fdb:decode_data(Data)}
     after
-        TimeoutMSec -> timeout
+        Timeout -> timeout
     end;
 
-wait(SubscriptionIDs, TimeoutMSec) when is_list(SubscriptionIDs) ->
-    {Result, ResendQ} = wait_any(SubscriptionIDs, TimeoutMSec, []),
+wait(Subs, Timeout) when is_list(Subs) ->
+    {Result, ResendQ} = wait_any(Subs, Timeout, []),
     lists:foreach(fun(Msg) -> self() ! Msg end, ResendQ),
     Result.
 
 
 -spec wait(job_subscription() | [job_subscription()], job_state(), timeout())
-    -> {job_type(), job_id(), job_state()} | timeout.
-wait({_, Ref} = Sub, State, TimeoutMSec) when is_atom(State) ->
+    -> {job_type(), job_id(), job_state(), job_data()} | timeout.
+wait({_, Ref} = Sub, State, Timeout) when is_atom(State) ->
     receive
-        {?COUCH_JOBS_EVENT, Ref, Type, Id, MsgState} ->
+        {?COUCH_JOBS_EVENT, Ref, Type, Id, MsgState, Data0} ->
             case MsgState =:= State of
-                true -> {Type, Id, State};
-                false -> wait(Sub, State, TimeoutMSec)
+                true ->
+                    Data = couch_jobs_fdb:decode_data(Data0),
+                    {Type, Id, State, Data};
+                false ->
+                    wait(Sub, State, Timeout)
             end
     after
-        TimeoutMSec -> timeout
+        Timeout -> timeout
     end;
 
-wait(SubscriptionIDs, State, TimeoutMSec) when is_list(SubscriptionIDs),
+wait(Subs, State, Timeout) when is_list(Subs),
         is_atom(State) ->
-    {Result, ResendQ} = wait_any(SubscriptionIDs, State, TimeoutMSec, []),
+    {Result, ResendQ} = wait_any(Subs, State, Timeout, []),
     lists:foreach(fun(Msg) -> self() ! Msg end, ResendQ),
     Result.
 
@@ -269,10 +277,10 @@ job(Type, JobId) ->
 
 wait_pending(PendingWatch, MaxSTime) ->
     NowMSec = erlang:system_time(millisecond),
-    TimeoutMSec0 = max(?MIN_ACCEPT_WAIT_MSEC, MaxSTime * 1000 - NowMSec),
-    TimeoutMSec = limit_timeout(TimeoutMSec0),
+    Timeout0 = max(?MIN_ACCEPT_WAIT_MSEC, MaxSTime * 1000 - NowMSec),
+    Timeout = limit_timeout(Timeout0),
     try
-        erlfdb:wait(PendingWatch, [{timeout, TimeoutMSec}]),
+        erlfdb:wait(PendingWatch, [{timeout, Timeout}]),
         ok
     catch
         error:{timeout, _} ->
@@ -280,33 +288,37 @@ wait_pending(PendingWatch, MaxSTime) ->
     end.
 
 
-wait_any(SubscriptionIDs, Timeout0, ResendQ) when is_list(SubscriptionIDs) ->
+wait_any(Subs, Timeout0, ResendQ) when is_list(Subs) ->
     Timeout = limit_timeout(Timeout0),
     receive
-        {?COUCH_JOBS_EVENT, Ref, Type, Id, State} = Msg ->
-            case lists:keyfind(Ref, 2, SubscriptionIDs) of
+        {?COUCH_JOBS_EVENT, Ref, Type, Id, State, Data0} = Msg ->
+            case lists:keyfind(Ref, 2, Subs) of
                 false ->
-                    wait_any(SubscriptionIDs, Timeout, [Msg | ResendQ]);
+                    wait_any(Subs, Timeout, [Msg | ResendQ]);
                 {_, Ref} ->
-                    {{Type, Id, State}, ResendQ}
+                    Data = couch_jobs_fdb:decode_data(Data0),
+                    {{Type, Id, State, Data}, ResendQ}
             end
     after
         Timeout -> {timeout, ResendQ}
     end.
 
 
-wait_any(SubscriptionIDs, State, Timeout0, ResendQ) when
-        is_list(SubscriptionIDs) ->
+wait_any(Subs, State, Timeout0, ResendQ) when
+        is_list(Subs) ->
     Timeout = limit_timeout(Timeout0),
     receive
-        {?COUCH_JOBS_EVENT, Ref, Type, Id, MsgState} = Msg ->
-            case lists:keyfind(Ref, 2, SubscriptionIDs) of
+        {?COUCH_JOBS_EVENT, Ref, Type, Id, MsgState, Data0} = Msg ->
+            case lists:keyfind(Ref, 2, Subs) of
                 false ->
-                    wait_any(SubscriptionIDs, Timeout, [Msg | ResendQ]);
+                    wait_any(Subs, Timeout, [Msg | ResendQ]);
                 {_, Ref} ->
                     case MsgState =:= State of
-                        true -> {{Type, Id, State}, ResendQ};
-                        false -> wait_any(SubscriptionIDs, Timeout, ResendQ)
+                        true ->
+                            Data = couch_jobs_fdb:decode_data(Data0),
+                            {{Type, Id, State, Data}, ResendQ};
+                        false ->
+                            wait_any(Subs, Timeout, ResendQ)
                     end
             end
     after

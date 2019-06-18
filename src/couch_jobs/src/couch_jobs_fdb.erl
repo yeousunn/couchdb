@@ -133,7 +133,7 @@ accept(#{jtx := true} = JTx0, Type, MaxSTime)
             #jv{jlock = null, data = Data} = JV0,
             JV = JV0#jv{seq = ?UNSET_VS, jlock = JLock, resubmit = false},
             set_job_val(Tx, Key, JV),
-            update_activity(JTx, Type, JobId, null),
+            update_activity(JTx, Type, JobId, null, Data),
             Job = #{
                 job => true,
                 type => Type,
@@ -197,20 +197,21 @@ resubmit(#{jtx := true} = JTx0, #{job := true} = Job, NewSTime) ->
     end.
 
 
-update(#{jtx := true} = JTx0, #{jlock := <<_/binary>>} = Job, Data) when
-        is_map(Data) orelse Data =:= undefined ->
+update(#{jtx := true} = JTx0, #{jlock := <<_/binary>>} = Job, Data0) when
+        is_map(Data0) orelse Data0 =:= undefined ->
     #{tx := Tx} = JTx = get_jtx(JTx0),
     #{jlock := JLock, type := Type, id := JobId} = Job,
     Key = job_key(JTx, Job),
     case get_job_or_halt(Tx, Key, JLock) of
         #jv{seq=Seq, stime = STime, resubmit = Resubmit} = JV0 ->
-            update_activity(JTx, Type, JobId, Seq),
-            JV = case Data =:= undefined of
-                true -> JV0;
-                false -> JV0#jv{data = Data}
+            Data = case Data0 =:= undefined of
+                true -> JV0#jv.data;
+                false -> Data0
             end,
-            try set_job_val(Tx, Key, JV#jv{seq = ?UNSET_VS}) of
+            JV = JV0#jv{seq = ?UNSET_VS, data = Data},
+            try set_job_val(Tx, Key, JV) of
                 ok ->
+                    update_activity(JTx, Type, JobId, Seq, Data),
                     {ok, Job#{resubmit => Resubmit, stime => STime}}
             catch
                 error:{json_encoding_error, Error} ->
@@ -293,7 +294,9 @@ get_active_since(#{jtx := true} = JTx, Type, Versionstamp) ->
     {_, EndKey} = erlfdb_tuple:range({Type}, Prefix),
     Opts = [{streaming_mode, want_all}],
     Future = erlfdb:get_range(Tx, StartKeySel, EndKey, Opts),
-    lists:map(fun({_K, JobId}) -> JobId end, erlfdb:wait(Future)).
+    maps:from_list(lists:map(fun({_K, V}) ->
+        erlfdb_tuple:unpack(V)
+    end, erlfdb:wait(Future))).
 
 
 get_inactive_since(#{jtx := true} = JTx, Type, Versionstamp) ->
@@ -304,7 +307,10 @@ get_inactive_since(#{jtx := true} = JTx, Type, Versionstamp) ->
     EndKeySel = erlfdb_key:first_greater_than(EndKey),
     Opts = [{streaming_mode, want_all}],
     Future = erlfdb:get_range(Tx, StartKey, EndKeySel, Opts),
-    lists:map(fun({_K, JobId}) -> JobId end, erlfdb:wait(Future)).
+    lists:map(fun({_K, V}) ->
+        {JobId, _} = erlfdb_tuple:unpack(V),
+        JobId
+    end, erlfdb:wait(Future)).
 
 
 re_enqueue_inactive(#{jtx := true} = JTx, Type, JobIds) when is_list(JobIds) ->
@@ -518,14 +524,19 @@ get_job_or_halt(Tx, Key, JLock) ->
     end.
 
 
-update_activity(#{jtx := true} = JTx, Type, JobId, Seq) ->
+update_activity(#{jtx := true} = JTx, Type, JobId, Seq, Data0) ->
     #{tx := Tx, jobs_path :=  Jobs} = JTx,
     case Seq =/= null of
         true -> clear_activity(JTx, Type, Seq);
         false -> ok
     end,
     Key = erlfdb_tuple:pack_vs({?ACTIVITY, Type, ?UNSET_VS}, Jobs),
-    erlfdb:set_versionstamped_key(Tx, Key, JobId),
+    Data = case Data0 of
+        #{} -> encode_data(Data0);
+        <<_/binary>> -> Data0
+    end,
+    Val = erlfdb_tuple:pack({JobId, Data}),
+    erlfdb:set_versionstamped_key(Tx, Key, Val),
     update_watch(JTx, Type).
 
 
@@ -589,10 +600,10 @@ ensure_current(#{jtx := true, tx := Tx} = JTx) ->
 
 
 update_current(#{tx := Tx, md_version := Version} = JTx) ->
-  case erlfdb:wait(erlfdb:get(Tx, ?METADATA_VERSION_KEY)) of
-      Version -> JTx;
-      _NewVersion -> update_jtx_cache(init_jtx(Tx))
-  end.
+    case erlfdb:wait(erlfdb:get(Tx, ?METADATA_VERSION_KEY)) of
+        Version -> JTx;
+        _NewVersion -> update_jtx_cache(init_jtx(Tx))
+    end.
 
 
 update_jtx_cache(#{jtx := true} = JTx) ->

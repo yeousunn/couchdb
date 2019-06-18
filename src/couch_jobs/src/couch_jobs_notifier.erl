@@ -75,15 +75,15 @@ terminate(_, _St) ->
 
 
 handle_call({subscribe, JobId, Pid}, _From, #st{} = St) ->
-    Res = case get_job_state(St, JobId) of
+    Res = case get_job(St, JobId) of
         {error, not_found} ->
             {error, not_found};
-        {ok, finished, _Seq} ->
-            {ok, finished};
-        {ok, State, Seq} ->
+        {ok, finished, _Seq, Data} ->
+            {ok, finished, Data};
+        {ok, State, Seq, Data} ->
             Ref = erlang:monitor(process, Pid),
             ets:insert(St#st.subs, {{JobId, Ref}, {Pid, State, Seq}}),
-            {ok, {Ref, State}}
+            {ok, {Ref, State, Data}}
     end,
     {reply, Res, St};
 
@@ -102,6 +102,7 @@ handle_call(Msg, _From, St) ->
 
 handle_cast(Msg, St) ->
     {stop, {bad_cast, Msg}, St}.
+
 
 handle_info({Ref, ready}, St) when is_reference(Ref) ->
     % Don't crash out couch_jobs_server and the whole application would need to
@@ -122,12 +123,12 @@ code_change(_OldVsn, St, _Extra) ->
     {ok, St}.
 
 
-get_job_state(#st{jtx = JTx, type = Type}, JobId) ->
+get_job(#st{jtx = JTx, type = Type}, JobId) ->
     couch_jobs_fdb:tx(JTx, fun(JTx1) ->
         Job = #{job => true, type => Type, id => JobId},
         case couch_jobs_fdb:get_job_state_and_data(JTx1, Job) of
-            {ok, Seq, State, _Data} ->
-                {ok, State, Seq};
+            {ok, Seq, State, Data} ->
+                {ok, State, Seq, Data};
             {error, not_found} ->
                 {error, not_found}
         end
@@ -139,10 +140,10 @@ get_jobs(#st{jtx = JTx, type = Type}, JobIds) ->
         lists:map(fun(JobId) ->
             Job = #{job => true, type => Type, id => JobId},
             case couch_jobs_fdb:get_job_state_and_data(JTx1, Job) of
-                {ok, Seq, State, _Data} ->
-                    {JobId, State, Seq};
+                {ok, Seq, State, Data} ->
+                    {JobId, State, Seq, Data};
                 {error, not_found} ->
-                    {JobId, not_found, null}
+                    {JobId, not_found, null, not_found}
             end
         end, JobIds)
     end).
@@ -161,13 +162,11 @@ get_type_vs(#st{jtx = JTx, type = Type}) ->
 get_active_since(#st{} = _St, not_found, _SubscribedJobs) ->
     [];
 
-get_active_since(#st{jtx = JTx, type = Type}, VS, SubscribedJobs) ->
-    AllUpdatedSet = sets:from_list(couch_jobs_fdb:tx(JTx, fun(JTx1) ->
+get_active_since(#st{jtx = JTx, type = Type}, VS, SubscribedIds) ->
+    AllUpdated = couch_jobs_fdb:tx(JTx, fun(JTx1) ->
         couch_jobs_fdb:get_active_since(JTx1, Type, VS)
-    end)),
-    SubscribedSet = sets:from_list(SubscribedJobs),
-    SubscribedActiveSet = sets:intersection(AllUpdatedSet, SubscribedSet),
-    sets:to_list(SubscribedActiveSet).
+    end),
+    maps:with(SubscribedIds, AllUpdated).
 
 
 get_subscribers(JobId, #st{subs = Subs}) ->
@@ -182,37 +181,44 @@ get_subscribed_job_ids(#st{subs = Subs}) ->
     lists:usort(lists:flatten(Matches)).
 
 
-notify_subscribers(ActiveVS, #st{subs = Subs, type = Type} = St) ->
+notify_subscribers(ActiveVS, #st{} = St) ->
     Ids = get_subscribed_job_ids(St),
     % First gather the easy (cheap) active jobs. Then with those out of way
     % inspect each job to get its state.
-    Active = get_active_since(St, ActiveVS, Ids),
-    JobStates = [{Id, running, ActiveVS} || Id <- Active],
-    NotActive = Ids -- Active,
-    JobStates1 = JobStates ++ get_jobs(St, NotActive),
-    lists:foreach(fun({Id, State, VS}) ->
+    ActiveMap = get_active_since(St, ActiveVS, Ids),
+    ActiveJobStates = maps:fold(fun(Id, Data, Acc) ->
+        [{Id, running, ActiveVS, Data} | Acc]
+    end, [], ActiveMap),
+    notify_job_ids(ActiveJobStates, St),
+    InactiveIds = Ids -- maps:keys(ActiveMap),
+    InactiveJobStates = get_jobs(St, InactiveIds),
+    notify_job_ids(InactiveJobStates, St).
+
+
+notify_job_ids(JobStates, #st{subs = Subs, type = Type} = St) ->
+    lists:foreach(fun({Id, State, VS, Data}) ->
         lists:foreach(fun
             ({_, _, running, OldVS}) when State =:= running, OldVS >= VS ->
                 ok;
             ({Ref, Pid, running, OldVS}) when State =:= running, OldVS < VS ->
                 % For running state send updates even if state doesn't change
-                notify(Pid, Ref, Type, Id, State),
+                notify(Pid, Ref, Type, Id, State, Data),
                 ets:insert(Subs, {{Id, Ref}, {Pid, running, VS}});
             ({_, _, OldState, _}) when OldState =:= State ->
                 ok;
             ({Ref, Pid, _, _}) ->
-                notify(Pid, Ref, Type, Id, State),
+                notify(Pid, Ref, Type, Id, State, Data),
                 ets:insert(Subs, {{Id, Ref}, {Pid, State, VS}})
         end, get_subscribers(Id, St)),
         case lists:member(State, [finished, not_found]) of
             true -> ets:match_delete(Subs, {{Id, '_'}, '_'});
             false -> ok
         end
-    end, JobStates1).
+    end, JobStates).
 
 
-notify(Pid, Ref, Type, Id, State) ->
-    Pid ! {?COUCH_JOBS_EVENT, Ref, Type, Id, State}.
+notify(Pid, Ref, Type, Id, State, Data) ->
+    Pid ! {?COUCH_JOBS_EVENT, Ref, Type, Id, State, Data}.
 
 
 get_holdoff() ->

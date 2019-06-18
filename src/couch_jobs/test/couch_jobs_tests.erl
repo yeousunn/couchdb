@@ -357,8 +357,8 @@ job_processor_update(#{t1 := T, j1 := J}) ->
         ok = couch_jobs:add(?TX, T, J, #{}),
         {ok, Job, #{}} = couch_jobs:accept(T),
 
-        % Use proper transactions in a few places here instead of passing in ?TX
-        % This is mostly to increase code coverage
+        % Use proper transactions in a few places here instead of passing in
+        % ?TX This is mostly to increase code coverage
 
         ?assertMatch({ok, #{job := true}}, fabric2_fdb:transactional(fun(Tx) ->
             couch_jobs:update(Tx, Job, #{<<"x">> => 1})
@@ -439,32 +439,38 @@ accept_max_schedtime(#{t1 := T, j1 := J1, j2 := J2}) ->
 
 subscribe(#{t1 := T, j1 := J}) ->
     ?_test(begin
-        ok = couch_jobs:add(?TX, T, J, #{}),
+        ok = couch_jobs:add(?TX, T, J, #{<<"z">> => 1}),
 
         ?assertEqual({error, not_found}, couch_jobs:subscribe(<<"xyz">>, J)),
         ?assertEqual({error, not_found}, couch_jobs:subscribe(T, <<"j5">>)),
 
         SubRes0 =  couch_jobs:subscribe(T, J),
-        ?assertMatch({ok, {_, _}, pending}, SubRes0),
-        {ok, SubId0, pending} = SubRes0,
+        ?assertMatch({ok, {_, _}, pending, #{<<"z">> := 1}}, SubRes0),
+        {ok, SubId0, pending, _} = SubRes0,
 
         ?assertEqual(ok, couch_jobs:unsubscribe(SubId0)),
 
         SubRes =  couch_jobs:subscribe(T, J),
-        ?assertMatch({ok, {_, _}, pending}, SubRes),
-        {ok, SubId, pending} = SubRes,
+        ?assertMatch({ok, {_, _}, pending, #{<<"z">> := 1}}, SubRes),
+        {ok, SubId, pending, _} = SubRes,
 
         {ok, Job, _} = couch_jobs:accept(T),
-        ?assertMatch({T, J, running}, couch_jobs:wait(SubId, 5000)),
-        ?assertMatch({ok, _}, couch_jobs:update(?TX, Job)),
-        % Make sure we get intermediate `running` updates
-        ?assertMatch({T, J, running}, couch_jobs:wait(SubId, 5000)),
+        ?assertMatch({T, J, running, #{<<"z">> := 1}},
+            couch_jobs:wait(SubId, 5000)),
 
-        ?assertEqual(ok, couch_jobs:finish(?TX, Job)),
-        ?assertMatch({T, J, finished}, couch_jobs:wait(SubId, finished, 5000)),
+        % Make sure we get intermediate `running` updates
+        ?assertMatch({ok, _}, couch_jobs:update(?TX, Job, #{<<"z">> => 2})),
+        ?assertMatch({T, J, running, #{<<"z">> := 2}},
+            couch_jobs:wait(SubId, 5000)),
+
+        ?assertEqual(ok, couch_jobs:finish(?TX, Job, #{<<"z">> => 3})),
+        ?assertMatch({T, J, finished, #{<<"z">> := 3}},
+            couch_jobs:wait(SubId, finished, 5000)),
 
         ?assertEqual(timeout, couch_jobs:wait(SubId, 50)),
-        ?assertEqual({ok, finished}, couch_jobs:subscribe(T, J)),
+
+        ?assertEqual({ok, finished, #{<<"z">> => 3}},
+            couch_jobs:subscribe(T, J)),
 
         ?assertEqual(ok, couch_jobs:remove(?TX, T, J)),
         ?assertEqual({error, not_found}, couch_jobs:subscribe(T, J))
@@ -476,8 +482,8 @@ subscribe_wait_multiple(#{t1 := T, j1 := J1, j2 := J2}) ->
         ok = couch_jobs:add(?TX, T, J1, #{}),
         ok = couch_jobs:add(?TX, T, J2, #{}),
 
-        {ok, S1, pending} = couch_jobs:subscribe(T, J1),
-        {ok, S2, pending} = couch_jobs:subscribe(T, J2),
+        {ok, S1, pending, #{}} = couch_jobs:subscribe(T, J1),
+        {ok, S2, pending, #{}} = couch_jobs:subscribe(T, J2),
 
         Subs = [S1, S2],
 
@@ -485,25 +491,26 @@ subscribe_wait_multiple(#{t1 := T, j1 := J1, j2 := J2}) ->
         % do not necessarily correspond got Job1 and Job2, they could be
         % accepted as Job2 and Job1 respectively.
         {ok, PJob1, _} = couch_jobs:accept(T),
-        ?assertMatch({_, _, running}, couch_jobs:wait(Subs, 5000)),
+        ?assertMatch({_, _, running, _}, couch_jobs:wait(Subs, 5000)),
         ?assertMatch(timeout, couch_jobs:wait(Subs, 50)),
 
         % Accept another job. Expect another update.
         {ok, PJob2, _} = couch_jobs:accept(T),
-        ?assertMatch({_, _, running}, couch_jobs:wait(Subs, 5000)),
+        ?assertMatch({_, _, running, _}, couch_jobs:wait(Subs, 5000)),
         ?assertMatch(timeout, couch_jobs:wait(Subs, 50)),
 
-        ?assertMatch({ok, _}, couch_jobs:update(?TX, PJob1)),
-        ?assertMatch({ok, _}, couch_jobs:update(?TX, PJob2)),
+        ?assertMatch({ok, _}, couch_jobs:update(?TX, PJob1, #{<<"q">> => 5})),
+        ?assertMatch({ok, _}, couch_jobs:update(?TX, PJob2, #{<<"r">> => 6})),
 
         % Each job was updated once, expect two running updates.
-        ?assertMatch({_, _, running}, couch_jobs:wait(Subs, 5000)),
-        ?assertMatch({_, _, running}, couch_jobs:wait(Subs, 5000)),
+        ?assertMatch({_, _, running, _}, couch_jobs:wait(Subs, 5000)),
+        ?assertMatch({_, _, running, _}, couch_jobs:wait(Subs, 5000)),
 
         % Finish one job. Expect one finished update only.
         ?assertEqual(ok, couch_jobs:finish(?TX, PJob1)),
 
-        ?assertMatch({_, _, finished}, couch_jobs:wait(Subs, finished, 5000)),
+        ?assertMatch({_, _, finished, #{<<"q">> := 5}},
+            couch_jobs:wait(Subs, finished, 5000)),
         ?assertMatch(timeout, couch_jobs:wait(Subs, finished, 50)),
 
         % Finish another job. However, unsubscribe should flush the
@@ -519,12 +526,13 @@ enqueue_inactive(#{t1 := T, j1 := J, t1_timeout := Timeout}) ->
     {timeout, 10, ?_test(begin
         couch_jobs_server:force_check_types(),
 
-        ok  = couch_jobs:add(?TX, T, J, #{}),
+        ok  = couch_jobs:add(?TX, T, J, #{<<"y">> => 1}),
         {ok, Job, _} = couch_jobs:accept(T),
 
-        {ok, SubId, running} = couch_jobs:subscribe(T, J),
+        {ok, SubId, running, #{<<"y">> := 1}} = couch_jobs:subscribe(T, J),
         Wait = 3 * Timeout * 1000,
-        ?assertEqual({T, J, pending}, couch_jobs:wait(SubId, pending, Wait)),
+        ?assertEqual({T, J, pending, #{<<"y">> => 1}},
+            couch_jobs:wait(SubId, pending, Wait)),
         ?assertMatch(#{state := pending}, get_job(T, J)),
 
         % After job was re-enqueued, old job processor can't update it anymore
