@@ -69,6 +69,13 @@ handle_info(check_activity, St) ->
     St2 = schedule_check(St1),
     {noreply, St2};
 
+handle_info({Ref, ready}, St) when is_reference(Ref) ->
+    % Don't crash out couch_jobs_server and the whole application would need to
+    % eventually do proper cleanup in erlfdb:wait timeout code.
+    LogMsg = "~p : spurious erlfdb future ready message ~p",
+    couch_log:error(LogMsg, [?MODULE, Ref]),
+    {noreply, St};
+
 handle_info(Msg, St) ->
     {stop, {bad_info, Msg}, St}.
 
