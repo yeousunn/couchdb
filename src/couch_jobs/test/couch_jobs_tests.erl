@@ -160,7 +160,7 @@ resubmit_as_job_creator(#{t1 := T, j1 := J}) ->
         ok = couch_jobs:add(?TX, T, J, Data, 16),
         ?assertMatch(#{state := pending, stime := 16}, get_job(T, J)),
 
-        {ok, Job1} = couch_jobs:accept(T),
+        {ok, Job1, Data} = couch_jobs:accept(T),
 
         % If is running, it gets flagged to be resubmitted
         ok = couch_jobs:add(?TX, T, J, Data, 17),
@@ -172,7 +172,7 @@ resubmit_as_job_creator(#{t1 := T, j1 := J}) ->
         ?assertMatch(#{state := pending, stime := 17}, get_job(T, J)),
 
         % A finished job will be re-enqueued
-        {ok, Job2} = couch_jobs:accept(T),
+        {ok, Job2, _} = couch_jobs:accept(T),
         ?assertEqual(ok, couch_jobs:finish(?TX, Job2)),
         ?assertMatch(#{state := finished, stime := 17}, get_job(T, J)),
         ok = couch_jobs:add(?TX, T, J, Data, 18),
@@ -317,7 +317,7 @@ bad_messages_restart_activity_monitor(#{}) ->
 basic_accept_and_finish(#{t1 := T, j1 := J}) ->
     ?_test(begin
         ok = couch_jobs:add(?TX, T, J, #{}),
-        {ok, Job} = couch_jobs:accept(T),
+        {ok, Job, #{}} = couch_jobs:accept(T),
         ?assertMatch(#{state := running}, get_job(T, J)),
         % check json validation for bad data in finish
         ?assertMatch({error, {json_encoding_error, _}},
@@ -344,18 +344,18 @@ accept_blocking(#{t1 := T, j1 := J1, j2 := J2}) ->
         end,
         {_, Ref1} = spawn_monitor(Accept),
         ok = couch_jobs:add(?TX, T, J1, #{}),
-        ?assertMatch({ok, #{id := J1}}, WaitAccept(Ref1)),
+        ?assertMatch({ok, #{id := J1}, #{}}, WaitAccept(Ref1)),
         {_, Ref2} = spawn_monitor(Accept),
         ?assertEqual(timeout, WaitAccept(Ref2)),
         ok = couch_jobs:add(?TX, T, J2, #{}),
-        ?assertMatch({ok, #{id := J2}}, WaitAccept(Ref2))
+        ?assertMatch({ok, #{id := J2}, #{}}, WaitAccept(Ref2))
     end).
 
 
 job_processor_update(#{t1 := T, j1 := J}) ->
     ?_test(begin
         ok = couch_jobs:add(?TX, T, J, #{}),
-        {ok, Job} = couch_jobs:accept(T),
+        {ok, Job, #{}} = couch_jobs:accept(T),
 
         % Use proper transactions in a few places here instead of passing in ?TX
         % This is mostly to increase code coverage
@@ -397,11 +397,11 @@ job_processor_update(#{t1 := T, j1 := J}) ->
 resubmit_enqueues_job(#{t1 := T, j1 := J}) ->
     ?_test(begin
         ok = couch_jobs:add(?TX, T, J, #{}),
-        {ok, Job1} = couch_jobs:accept(T),
+        {ok, Job1, #{}} = couch_jobs:accept(T),
         ?assertMatch({ok, _}, couch_jobs:resubmit(?TX, Job1, 6)),
         ?assertEqual(ok, couch_jobs:finish(?TX, Job1)),
         ?assertMatch(#{state := pending, stime := 6}, get_job(T, J)),
-        {ok, Job2} = couch_jobs:accept(T),
+        {ok, Job2, #{}} = couch_jobs:accept(T),
         ?assertEqual(ok, couch_jobs:finish(?TX, Job2)),
         ?assertMatch(#{state := finished}, get_job(T, J))
     end).
@@ -411,9 +411,9 @@ add_with_scheduled_time(#{t1 := T, j1 := J1, j2 := J2}) ->
     ?_test(begin
         ?assertEqual(ok, couch_jobs:add(?TX, T, J1, #{}, 5)),
         ?assertEqual(ok, couch_jobs:add(?TX, T, J2, #{}, 3)),
-        ?assertMatch({ok, #{id := J}} when J =:= J1 orelse J =:= J2,
+        ?assertMatch({ok, #{id := J}, _} when J =:= J1 orelse J =:= J2,
             couch_jobs:accept(T, 3)),
-        ?assertMatch({ok, #{id := J}} when J =:= J1 orelse J =:= J2,
+        ?assertMatch({ok, #{id := J}, _} when J =:= J1 orelse J =:= J2,
             couch_jobs:accept(T, 9))
     end).
 
@@ -421,7 +421,7 @@ add_with_scheduled_time(#{t1 := T, j1 := J1, j2 := J2}) ->
 resubmit_custom_schedtime(#{t1 := T, j1 := J}) ->
     ?_test(begin
         ?assertEqual(ok, couch_jobs:add(?TX, T, J, #{}, 7)),
-        {ok, Job} = couch_jobs:accept(T),
+        {ok, Job, #{}} = couch_jobs:accept(T),
         ?assertMatch({ok, _}, couch_jobs:resubmit(?TX, Job, 9)),
         ?assertEqual(ok, couch_jobs:finish(?TX, Job)),
         ?assertMatch(#{stime := 9, state := pending}, get_job(T, J))
@@ -432,8 +432,8 @@ accept_max_schedtime(#{t1 := T, j1 := J1, j2 := J2}) ->
     ?_test(begin
         ok = couch_jobs:add(?TX, T, J1, #{}, 5),
         ok = couch_jobs:add(?TX, T, J2, #{}, 3),
-        ?assertMatch({ok, #{id := J2}}, couch_jobs:accept(T, 3)),
-        ?assertMatch({ok, #{id := J1}}, couch_jobs:accept(T, 9))
+        ?assertMatch({ok, #{id := J2}, _}, couch_jobs:accept(T, 3)),
+        ?assertMatch({ok, #{id := J1}, _}, couch_jobs:accept(T, 9))
     end).
 
 
@@ -454,7 +454,7 @@ subscribe(#{t1 := T, j1 := J}) ->
         ?assertMatch({ok, {_, _}, pending}, SubRes),
         {ok, SubId, pending} = SubRes,
 
-        {ok, Job} = couch_jobs:accept(T),
+        {ok, Job, _} = couch_jobs:accept(T),
         ?assertMatch({T, J, running}, couch_jobs:wait(SubId, 5000)),
         ?assertMatch({ok, _}, couch_jobs:update(?TX, Job)),
         % Make sure we get intermediate `running` updates
@@ -484,12 +484,12 @@ subscribe_wait_multiple(#{t1 := T, j1 := J1, j2 := J2}) ->
         % Accept one job. Only one running update is expected. PJob1 and PJob2
         % do not necessarily correspond got Job1 and Job2, they could be
         % accepted as Job2 and Job1 respectively.
-        {ok, PJob1} = couch_jobs:accept(T),
+        {ok, PJob1, _} = couch_jobs:accept(T),
         ?assertMatch({_, _, running}, couch_jobs:wait(Subs, 5000)),
         ?assertMatch(timeout, couch_jobs:wait(Subs, 50)),
 
         % Accept another job. Expect another update.
-        {ok, PJob2} = couch_jobs:accept(T),
+        {ok, PJob2, _} = couch_jobs:accept(T),
         ?assertMatch({_, _, running}, couch_jobs:wait(Subs, 5000)),
         ?assertMatch(timeout, couch_jobs:wait(Subs, 50)),
 
@@ -520,7 +520,7 @@ enqueue_inactive(#{t1 := T, j1 := J, t1_timeout := Timeout}) ->
         couch_jobs_server:force_check_types(),
 
         ok  = couch_jobs:add(?TX, T, J, #{}),
-        {ok, Job} = couch_jobs:accept(T),
+        {ok, Job, _} = couch_jobs:accept(T),
 
         {ok, SubId, running} = couch_jobs:subscribe(T, J),
         Wait = 3 * Timeout * 1000,
@@ -536,7 +536,7 @@ enqueue_inactive(#{t1 := T, j1 := J, t1_timeout := Timeout}) ->
 remove_running_job(#{t1 := T, j1 := J}) ->
     ?_test(begin
         ok = couch_jobs:add(?TX, T, J, #{}),
-        {ok, Job} = couch_jobs:accept(T),
+        {ok, Job, _} = couch_jobs:accept(T),
         ?assertEqual(ok, couch_jobs:remove(?TX, T, J)),
         ?assertEqual({error, not_found}, couch_jobs:remove(?TX, T, J)),
         ?assertEqual({error, halt}, couch_jobs:update(?TX, Job)),
@@ -552,7 +552,7 @@ check_get_jobs(#{t1 := T1, j1 := J1, t2 := T2, j2 := J2}) ->
             {T2, J2, pending, #{}},
             {T1, J1, pending, #{}}
         ], lists:sort(couch_jobs_fdb:get_jobs())),
-        {ok, _} = couch_jobs:accept(T1),
+        {ok, _, _} = couch_jobs:accept(T1),
         ?assertMatch([
             {T2, J2, pending, #{}},
             {T1, J1, running, #{}}
@@ -565,7 +565,7 @@ use_fabric_transaction_object(#{t1 := T1, j1 := J1, dbname := DbName}) ->
         {ok, Db} = fabric2_db:create(DbName, []),
         ?assertEqual(ok, couch_jobs:add(Db, T1, J1, #{})),
         ?assertMatch(#{state := pending, data := #{}}, get_job(T1, J1)),
-        {ok, Job} = couch_jobs:accept(T1),
+        {ok, Job, _} = couch_jobs:accept(T1),
         ?assertEqual(ok, fabric2_fdb:transactional(Db, fun(Db1) ->
             {ok, #{}} = couch_jobs:get_job_data(Db1, T1, J1),
             Doc1 = #doc{id = <<"1">>, body = {[]}},

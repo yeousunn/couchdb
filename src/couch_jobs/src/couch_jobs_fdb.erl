@@ -126,10 +126,11 @@ accept(#{jtx := true} = JTx0, Type, MaxSTime)
     case couch_jobs_pending:dequeue(JTx, Type, MaxSTime) of
         {not_found, PendingWatch} ->
             {not_found, PendingWatch};
-        {ok, <<_/binary>> = JobId} ->
+        {ok, JobId} ->
             JLock = fabric2_util:uuid(),
             Key = job_key(JTx, Type, JobId),
-            #jv{jlock = null} = JV0 = get_job_val(Tx, Key),
+            JV0 = get_job_val(Tx, Key),
+            #jv{jlock = null, data = Data} = JV0,
             JV = JV0#jv{seq = ?UNSET_VS, jlock = JLock, resubmit = false},
             set_job_val(Tx, Key, JV),
             update_activity(JTx, Type, JobId, null),
@@ -139,7 +140,7 @@ accept(#{jtx := true} = JTx0, Type, MaxSTime)
                 id => JobId,
                 jlock => JLock
             },
-            {ok, Job}
+            {ok, Job, decode_data(Data)}
     end.
 
 

@@ -101,7 +101,7 @@ get_job_state(Tx, Type, JobId) ->
 
 %% Job processor API
 
--spec accept(job_type()) -> {ok, job()} | {error, any()}.
+-spec accept(job_type()) -> {ok, job(), job_data()} | {error, any()}.
 accept(Type) ->
     accept(Type, ?UNDEFINED_MAX_SCHEDULED_TIME).
 
@@ -110,8 +110,8 @@ accept(Type) ->
 accept(Type, MaxSchedTime) ->
     TxFun =  fun(JTx) -> couch_jobs_fdb:accept(JTx, Type, MaxSchedTime) end,
     case couch_jobs_fdb:tx(couch_jobs_fdb:get_jtx(), TxFun) of
-        {ok, Job} ->
-            {ok, Job};
+        {ok, Job, Data} ->
+            {ok, Job, Data};
         {not_found, PendingWatch} ->
             case wait_pending(PendingWatch, MaxSchedTime) of
                 {error, not_found} ->
